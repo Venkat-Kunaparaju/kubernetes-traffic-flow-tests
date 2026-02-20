@@ -524,19 +524,7 @@ class Task(ABC):
         pod_ip = None
         try:
             if y:
-                if self.ts.connection.secondary_network_nad:
-                    network_status_str = y["metadata"]["annotations"][
-                        "k8s.v1.cni.cncf.io/network-status"
-                    ]
-                    network_status = json.loads(network_status_str)
-
-                    nad = self.ts.connection.effective_secondary_network_nad
-                    for network in network_status:
-                        if network["name"] == nad:
-                            pod_ip = network["ips"][0]
-                            break
-                else:
-                    pod_ip = y["status"]["podIP"]
+                pod_ip = y["status"]["podIP"]
         except Exception:
             pass
         if not isinstance(pod_ip, str):
