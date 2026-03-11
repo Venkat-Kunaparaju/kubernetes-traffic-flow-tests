@@ -9,6 +9,7 @@ from typing import Optional
 
 from ktoolbox import common
 
+import generate_config
 import print_results
 import tftbase
 
@@ -28,6 +29,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "config",
         metavar="config",
+        nargs="?",
+        default=None,
         type=str,
         help='YAML file with test configuration (see "config.yaml").',
     )
@@ -82,7 +85,7 @@ def parse_args() -> argparse.Namespace:
 
     common.log_config_logger(args.verbosity, "tft", "ktoolbox")
 
-    if not Path(args.config).exists():
+    if args.config is not None and not Path(args.config).exists():
         raise ValueError("Must provide a valid config.yaml file (see config.yaml)")
 
     return args
@@ -92,15 +95,31 @@ def parse_args_full() -> tuple[TestConfig, bool]:
     args = parse_args()
 
     args_check = args.check
-    tc = TestConfig(
-        config_path=args.config,
-        evaluator_config=args.evaluator_config,
-        kubeconfigs=option_get_kubeconfigs(
-            args.kubeconfig,
-            args.kubeconfig_infra,
-        ),
-        output_base=args.output_base,
-    )
+
+    if args.config is None:
+        # TODO: Generate config based on deployment mode enviorn (NKE, VMaaS, etc.)
+        full_config = generate_config.NGN.auto_generate_config()
+        generated_eval_config = full_config.pop("_generated_eval_config", None)
+        evaluator_config = args.evaluator_config or generated_eval_config
+        tc = TestConfig(
+            full_config=full_config,
+            evaluator_config=evaluator_config,
+            kubeconfigs=option_get_kubeconfigs(
+                args.kubeconfig,
+                args.kubeconfig_infra,
+            ),
+            output_base=args.output_base,
+        )
+    else:
+        tc = TestConfig(
+            config_path=args.config,
+            evaluator_config=args.evaluator_config,
+            kubeconfigs=option_get_kubeconfigs(
+                args.kubeconfig,
+                args.kubeconfig_infra,
+            ),
+            output_base=args.output_base,
+        )
 
     return tc, args_check
 
