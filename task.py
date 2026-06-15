@@ -409,6 +409,13 @@ class Task(ABC):
             or self.ts.connection.effective_secondary_network_nad
         )
 
+    def _get_sriov_resource_quantity(self) -> str:
+        if self.node.sriov and (
+            self.ts.test_case_id.is_udn or self.pod_type == PodType.SECONDARY
+        ):
+            return "2"
+        return "1"
+
     def get_template_args(self) -> dict[str, str | list[str] | bool]:
         resource_name = self.get_resource_name()
         conn = self.ts.connection
@@ -442,6 +449,7 @@ class Task(ABC):
             ),
             "has_resource_name": bool(resource_name),
             "resource_name": _j(resource_name),
+            "sriov_resource_quantity": _j(self._get_sriov_resource_quantity()),
             "default_network": _j(self.node.default_network),
             "has_resources": has_resources,
             "cpu_request": conn.cpu_request or "",
