@@ -756,7 +756,7 @@ class ConnectionMode(Enum):
 class TargetAccessMode(Enum):
     IP = 1
     SERVICE_NAME = 2
-    SERVER_NODE_IP = 3
+    CLIENT_NODE_IP = 3
 
 
 _SERVICE_TARGET_ACCESS_CONNECTION_MODES = (
@@ -773,6 +773,8 @@ def get_default_target_access_mode(
     if connection_mode in _SERVICE_TARGET_ACCESS_CONNECTION_MODES:
         if override is not None:
             return override
+        if connection_mode == ConnectionMode.NODE_PORT_IP:
+            return TargetAccessMode.CLIENT_NODE_IP
         return TargetAccessMode.IP
     return TargetAccessMode.IP
 
@@ -788,7 +790,7 @@ def get_target_access_modes(
         return (
             TargetAccessMode.IP,
             TargetAccessMode.SERVICE_NAME,
-            TargetAccessMode.SERVER_NODE_IP,
+            TargetAccessMode.CLIENT_NODE_IP,
         )
     if connection_mode == ConnectionMode.LOAD_BALANCER:
         return (TargetAccessMode.IP, TargetAccessMode.SERVICE_NAME)
