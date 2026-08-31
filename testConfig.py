@@ -957,6 +957,7 @@ class TestConfig:
     _client_tenant: Optional[K8sClient]
     _client_infra: Optional[K8sClient]
     _lock: threading.Lock
+    created_dpu_namespaces: list[str]
     evaluator_config: Optional[str]
     output_base: Optional[str]
 
@@ -1060,6 +1061,7 @@ class TestConfig:
         self._lock = threading.Lock()
         self._client_tenant = None
         self._client_infra = None
+        self.created_dpu_namespaces = []
 
         if not output_base:
             output_base = None
