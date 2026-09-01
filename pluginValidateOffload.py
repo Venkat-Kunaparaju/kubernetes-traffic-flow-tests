@@ -1,5 +1,6 @@
 import json
 import re
+import shlex
 import typing
 
 from typing import Optional
@@ -101,6 +102,23 @@ def ethtool_stat_get_startend(
     return has_any
 
 
+def ovs_stat_get_startend(
+    parsed_data: dict[str, int],
+    ovs_data: str,
+    suffix: typing.Literal["start", "end"],
+) -> bool:
+    values = ovs_data.splitlines()
+    if len(values) != 2:
+        return False
+    try:
+        rx_packets, tx_packets = (int(value.strip()) for value in values)
+    except ValueError:
+        return False
+    parsed_data[KEY_NAMES[suffix]["rx"]] = rx_packets
+    parsed_data[KEY_NAMES[suffix]["tx"]] = tx_packets
+    return True
+
+
 def check_no_traffic_on_vf_rep(
     parsed_data: dict[str, typing.Any],
     direction: typing.Literal["rx", "tx"],
@@ -113,7 +131,7 @@ def check_no_traffic_on_vf_rep(
     )
     if start is None or end is None:
         if start is not None or end is not None:
-            return f"missing ethtool output for {direction}"
+            return f"missing packet statistics for {direction}"
         return None
     if end - start >= VF_REP_TRAFFIC_THRESHOLD:
         return f"traffic on VF rep detected for {repr(direction)} ({end-start} packets is higher than threshold {VF_REP_TRAFFIC_THRESHOLD})"
@@ -169,6 +187,7 @@ class TaskValidateOffload(PluginTask):
         self._perf_instance = perf_instance
         self.perf_pod_name = perf_instance.pod_name
         self.perf_pod_type = perf_instance.pod_type
+        self._use_ovs_stats = tftbase.get_tft_validate_offload_ovs()
 
         # DPU mode: we need a tools pod on the DPU to query VF reps
         self._dpu_pod_name: Optional[str] = None
@@ -333,6 +352,16 @@ class TaskValidateOffload(PluginTask):
             may_fail=may_fail,
             namespace=self.get_namespace(),
         )
+
+    def _run_tools_exec(
+        self,
+        cmd: str,
+        *,
+        may_fail: bool = False,
+    ) -> host.Result:
+        if self._is_dpu_mode:
+            return self._run_oc_exec_dpu(cmd, may_fail=may_fail)
+        return self.run_oc_exec(cmd, may_fail=may_fail)
 
     def _get_vf_info_from_pod(
         self, pod_name: str, ifname: str
@@ -505,7 +534,8 @@ class TaskValidateOffload(PluginTask):
 
             success_result = True
             msg: Optional[str] = None
-            ethtool_cmd = ""
+            stats_cmd = ""
+            stats_backend = "ovs" if self._use_ovs_stats else "ethtool"
             parsed_data: dict[str, typing.Any] = {}
             data1 = ""
             data2 = ""
@@ -548,25 +578,27 @@ class TaskValidateOffload(PluginTask):
                         logger.info(
                             f"VF representor for {ifname} in pod {self.perf_pod_name} is {repr(vf_rep)}"
                         )
-                        ethtool_cmd = f"ethtool -S {vf_rep}"
+                        if self._use_ovs_stats:
+                            stats_cmd = (
+                                "chroot /host ovs-vsctl get Interface "
+                                f"{shlex.quote(vf_rep)} statistics:rx_packets "
+                                "statistics:tx_packets"
+                            )
+                        else:
+                            stats_cmd = f"ethtool -S {shlex.quote(vf_rep)}"
 
             self.ts.clmo_barrier.wait()
 
             if vf_rep is not None:
-                if self._is_dpu_mode:
-                    r1 = self._run_oc_exec_dpu(ethtool_cmd)
-                else:
-                    r1 = self.run_oc_exec(ethtool_cmd)
+                r1 = self._run_tools_exec(stats_cmd)
 
                 self.ts.event_client_finished.wait()
 
-                if self._is_dpu_mode:
-                    r2 = self._run_oc_exec_dpu(ethtool_cmd)
-                else:
-                    r2 = self.run_oc_exec(ethtool_cmd)
+                r2 = self._run_tools_exec(stats_cmd)
 
-                parsed_data["ethtool_cmd_1"] = common.dataclass_to_dict(r1)
-                parsed_data["ethtool_cmd_2"] = common.dataclass_to_dict(r2)
+                parsed_data["statistics_backend"] = stats_backend
+                parsed_data[f"{stats_backend}_cmd_1"] = common.dataclass_to_dict(r1)
+                parsed_data[f"{stats_backend}_cmd_2"] = common.dataclass_to_dict(r2)
 
                 if r1.success:
                     data1 = r1.out
@@ -575,19 +607,30 @@ class TaskValidateOffload(PluginTask):
 
                 if not r1.success:
                     success_result = False
-                    msg = "ethtool command failed"
+                    msg = f"{stats_backend} statistics command failed"
                 elif not r2.success:
                     success_result = False
-                    msg = "ethtool command at end failed"
+                    msg = f"{stats_backend} statistics command at end failed"
 
-                if not ethtool_stat_get_startend(parsed_data, data1, "start"):
+                if self._use_ovs_stats:
+                    parsed_start = ovs_stat_get_startend(parsed_data, data1, "start")
+                    parsed_end = ovs_stat_get_startend(parsed_data, data2, "end")
+                else:
+                    parsed_start = ethtool_stat_get_startend(
+                        parsed_data, data1, "start"
+                    )
+                    parsed_end = ethtool_stat_get_startend(parsed_data, data2, "end")
+
+                if not parsed_start:
                     if success_result:
                         success_result = False
-                        msg = "ethtool output cannot be parsed"
-                if not ethtool_stat_get_startend(parsed_data, data2, "end"):
+                        msg = f"{stats_backend} statistics output cannot be parsed"
+                if not parsed_end:
                     if success_result:
                         success_result = False
-                        msg = "ethtool output at end cannot be parsed"
+                        msg = (
+                            f"{stats_backend} statistics output at end cannot be parsed"
+                        )
 
                 logger.info(
                     f"rx_packet_start: {parsed_data.get('rx_start', 'N/A')}\n"
@@ -607,7 +650,7 @@ class TaskValidateOffload(PluginTask):
                 success=success_result,
                 msg=msg,
                 plugin_metadata=self.get_plugin_metadata(),
-                command=ethtool_cmd,
+                command=stats_cmd,
                 result=parsed_data,
             )
 

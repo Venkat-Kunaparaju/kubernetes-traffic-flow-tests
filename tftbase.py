@@ -45,6 +45,7 @@ ENV_TFT_POD_BRINGUP_TIMEOUT = "TFT_POD_BRINGUP_TIMEOUT"
 ENV_TFT_LOG_PREAMBLE = "TFT_LOG_PREAMBLE"
 ENV_TFT_ENABLE_TARGET_ACCESS_SUBTESTS = "TFT_ENABLE_TARGET_ACCESS_SUBTESTS"
 ENV_TFT_DEFAULT_TARGET_ACCESS_MODE = "TFT_DEFAULT_TARGET_ACCESS_MODE"
+ENV_TFT_VALIDATE_OFFLOAD_OVS = "TFT_VALIDATE_OFFLOAD_OVS"
 
 
 def get_environ(name: str) -> Optional[str]:
@@ -385,6 +386,11 @@ def _get_bool_env(name: str, *, default: bool) -> bool:
         raise ValueError(f"Invalid {name}: {shlex.quote(raw or '')}") from e
     logger.info(f"env: {name}={shlex.quote(raw or '')} -> {value}")
     return value
+
+
+@functools.cache
+def get_tft_validate_offload_ovs() -> bool:
+    return _get_bool_env(ENV_TFT_VALIDATE_OFFLOAD_OVS, default=False)
 
 
 @functools.cache

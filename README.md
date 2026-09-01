@@ -298,6 +298,10 @@ provisioning.dpu.nvidia.com/host: worker-node-name
 
 The plugin uses this label to find the correct DPU node for each worker node.
 
+Set `TFT_VALIDATE_OFFLOAD_OVS=true` to read the VF representor's `rx_packets`
+and `tx_packets` from OVSDB instead of using `ethtool -S`. The default is
+`false`, which retains ethtool statistics.
+
 ### How It Works
 
 1. **DPU Node Discovery**: The plugin queries DPU nodes by label to find the DPU
@@ -309,8 +313,9 @@ The plugin uses this label to find the correct DPU node for each worker node.
 3. **VF Representor Lookup**: Uses `devlink port show` on the DPU to find the VF
    representor by matching `pfnum` and `vfnum` (vendor-agnostic).
 
-4. **Ethtool Stats**: Runs `ethtool -S` on the VF representor from the DPU tools pod
-   to verify hardware offload.
+4. **Offload Validation**: By default, runs `ethtool -S` on the VF representor.
+   With `TFT_VALIDATE_OFFLOAD_OVS=true`, reads the representor's `rx_packets`
+   and `tx_packets` from OVSDB through the host-mounted filesystem.
 
 ## Running the tests
 
