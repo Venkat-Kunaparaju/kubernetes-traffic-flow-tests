@@ -1,3 +1,4 @@
+import json
 import re
 import typing
 
@@ -400,6 +401,42 @@ class TaskValidateOffload(PluginTask):
         logger.warning(f"Could not determine VF index for {ifname}")
         return None
 
+    def _get_perf_pod_ifname(self) -> Optional[str]:
+        if not self.ts.test_case_id.is_udn:
+            return "net1" if self._perf_instance.uses_secondary_ip else "eth0"
+
+        pod = self._perf_instance.run_oc_get(
+            f"pod/{self.perf_pod_name}", die_on_error=True
+        )
+        if pod is None:
+            logger.warning(f"Could not get pod {self.perf_pod_name}")
+            return None
+
+        try:
+            network_status = json.loads(
+                pod["metadata"]["annotations"]["k8s.v1.cni.cncf.io/network-status"]
+            )
+            pod_ip = self._perf_instance.get_pod_ip()
+            for network in network_status:
+                if not isinstance(network, dict):
+                    continue
+                if pod_ip in network.get("ips", []):
+                    ifname = network.get("interface")
+                    if isinstance(ifname, str) and ifname:
+                        logger.info(f"Found interface {ifname} for UDN pod IP {pod_ip}")
+                        return ifname
+        except (KeyError, TypeError, json.JSONDecodeError) as e:
+            logger.warning(
+                f"Could not parse network status for pod {self.perf_pod_name}: {e}"
+            )
+            return None
+
+        logger.warning(
+            f"Could not find an interface for UDN pod IP {pod_ip} "
+            f"in network status for pod {self.perf_pod_name}"
+        )
+        return None
+
     def _get_vf_rep_on_dpu(self, vf_index: int, pf_index: int = 0) -> Optional[str]:
         """Find the VF representor on the DPU for a given VF index.
 
@@ -481,37 +518,41 @@ class TaskValidateOffload(PluginTask):
                 logger.info("There is no VF on an external server")
                 msg = "External Iperf Server"
             else:
-                ifname = "net1" if self._perf_instance.uses_secondary_ip else "eth0"
-                # Get VF representor - use DPU mode if configured
-                if self._is_dpu_mode:
-                    logger.info("DPU mode: querying VF representor from DPU cluster")
-                    vf_rep = self._get_vf_rep_dpu_mode(
-                        pod_name=self.perf_pod_name,
-                        ifname=ifname,
-                    )
-                else:
-                    vf_rep = self.pod_get_vf_rep(
-                        pod_name=self.perf_pod_name,
-                        ifname=ifname,
-                        host_pod_name=self.pod_name,
-                    )
-
-                if vf_rep is None:
+                ifname = self._get_perf_pod_ifname()
+                if ifname is None:
                     success_result = False
-                    msg = "cannot determine VF_REP for pod"
-                    logger.error(
-                        f"VF representor for {ifname} in {self.perf_pod_name} not detected"
-                    )
+                    msg = "cannot determine pod interface"
                 else:
-                    logger.info(
-                        f"VF representor for {ifname} in pod {self.perf_pod_name} is {repr(vf_rep)}"
-                    )
-                    ethtool_cmd = f"ethtool -S {vf_rep}"
+                    if self._is_dpu_mode:
+                        logger.info(
+                            "DPU mode: querying VF representor from DPU cluster"
+                        )
+                        vf_rep = self._get_vf_rep_dpu_mode(
+                            pod_name=self.perf_pod_name,
+                            ifname=ifname,
+                        )
+                    else:
+                        vf_rep = self.pod_get_vf_rep(
+                            pod_name=self.perf_pod_name,
+                            ifname=ifname,
+                            host_pod_name=self.pod_name,
+                        )
+
+                    if vf_rep is None:
+                        success_result = False
+                        msg = "cannot determine VF_REP for pod"
+                        logger.error(
+                            f"VF representor for {ifname} in {self.perf_pod_name} not detected"
+                        )
+                    else:
+                        logger.info(
+                            f"VF representor for {ifname} in pod {self.perf_pod_name} is {repr(vf_rep)}"
+                        )
+                        ethtool_cmd = f"ethtool -S {vf_rep}"
 
             self.ts.clmo_barrier.wait()
 
             if vf_rep is not None:
-                # Run ethtool - use DPU pod if in DPU mode
                 if self._is_dpu_mode:
                     r1 = self._run_oc_exec_dpu(ethtool_cmd)
                 else:
