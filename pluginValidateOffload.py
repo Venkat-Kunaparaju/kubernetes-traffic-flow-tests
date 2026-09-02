@@ -104,6 +104,7 @@ def ethtool_stat_get_startend(
 def check_no_traffic_on_vf_rep(
     parsed_data: dict[str, typing.Any],
     direction: typing.Literal["rx", "tx"],
+    statistics_backend: str,
 ) -> Optional[str]:
     start = common.dict_get_typed(
         parsed_data, KEY_NAMES["start"][direction], int, allow_missing=True
@@ -113,10 +114,10 @@ def check_no_traffic_on_vf_rep(
     )
     if start is None or end is None:
         if start is not None or end is not None:
-            return f"missing packet statistics for {direction}"
+            return f"missing {statistics_backend} {direction} packet statistics"
         return None
     if end - start >= VF_REP_TRAFFIC_THRESHOLD:
-        return f"traffic on VF rep detected for {repr(direction)} ({end-start} packets is higher than threshold {VF_REP_TRAFFIC_THRESHOLD})"
+        return f"traffic on VF rep detected in {statistics_backend} {direction} statistics ({end-start} packets is higher than threshold {VF_REP_TRAFFIC_THRESHOLD})"
     return None
 
 
@@ -579,6 +580,8 @@ class TaskValidateOffload(PluginTask):
                         )
 
                 logger.info(
+                    f"{stats_backend} statistics for pod {self.perf_pod_name} "
+                    f"on node {self.node_name}:\n"
                     f"rx_packet_start: {parsed_data.get('rx_start', 'N/A')}\n"
                     f"tx_packet_start: {parsed_data.get('tx_start', 'N/A')}\n"
                     f"rx_packet_end: {parsed_data.get('rx_end', 'N/A')}\n"
@@ -586,8 +589,8 @@ class TaskValidateOffload(PluginTask):
                 )
 
                 if success_result:
-                    m1 = check_no_traffic_on_vf_rep(parsed_data, "rx")
-                    m2 = check_no_traffic_on_vf_rep(parsed_data, "tx")
+                    m1 = check_no_traffic_on_vf_rep(parsed_data, "rx", stats_backend)
+                    m2 = check_no_traffic_on_vf_rep(parsed_data, "tx", stats_backend)
                     if m1 is not None or m2 is not None:
                         success_result = False
                         msg = m1 if m1 is not None else m2
