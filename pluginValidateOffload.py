@@ -1,4 +1,5 @@
 import re
+import shlex
 import typing
 
 from typing import Optional
@@ -103,6 +104,7 @@ def ethtool_stat_get_startend(
 def check_no_traffic_on_vf_rep(
     parsed_data: dict[str, typing.Any],
     direction: typing.Literal["rx", "tx"],
+    statistics_backend: str,
 ) -> Optional[str]:
     start = common.dict_get_typed(
         parsed_data, KEY_NAMES["start"][direction], int, allow_missing=True
@@ -112,15 +114,27 @@ def check_no_traffic_on_vf_rep(
     )
     if start is None or end is None:
         if start is not None or end is not None:
-            return f"missing ethtool output for {direction}"
+            return f"missing {statistics_backend} {direction} packet statistics"
         return None
     if end - start >= VF_REP_TRAFFIC_THRESHOLD:
-        return f"traffic on VF rep detected for {repr(direction)} ({end-start} packets is higher than threshold {VF_REP_TRAFFIC_THRESHOLD})"
+        return f"traffic on VF rep detected in {statistics_backend} {direction} statistics ({end-start} packets is higher than threshold {VF_REP_TRAFFIC_THRESHOLD})"
     return None
 
 
 class PluginValidateOffload(pluginbase.Plugin):
     PLUGIN_NAME = "validate_offload"
+    STATISTICS_BACKEND = "ethtool"
+
+    def statistics_command(self, vf_rep: str) -> str:
+        return f"ethtool -S {shlex.quote(vf_rep)}"
+
+    def statistics_get_startend(
+        self,
+        parsed_data: dict[str, int],
+        output: str,
+        suffix: typing.Literal["start", "end"],
+    ) -> bool:
+        return ethtool_stat_get_startend(parsed_data, output, suffix)
 
     def _enable(
         self,
@@ -132,8 +146,8 @@ class PluginValidateOffload(pluginbase.Plugin):
     ) -> list[PluginTask]:
         # TODO allow this to run on each individual server + client pairs.
         return [
-            TaskValidateOffload(ts, TaskRole.SERVER, perf_server, tenant),
-            TaskValidateOffload(ts, TaskRole.CLIENT, perf_client, tenant),
+            TaskValidateOffload(self, ts, TaskRole.SERVER, perf_server, tenant),
+            TaskValidateOffload(self, ts, TaskRole.CLIENT, perf_client, tenant),
         ]
 
 
@@ -142,8 +156,8 @@ plugin = pluginbase.register_plugin(PluginValidateOffload())
 
 class TaskValidateOffload(PluginTask):
     @property
-    def plugin(self) -> pluginbase.Plugin:
-        return plugin
+    def plugin(self) -> PluginValidateOffload:
+        return self._plugin
 
     @property
     def _is_dpu_mode(self) -> bool:
@@ -151,11 +165,13 @@ class TaskValidateOffload(PluginTask):
 
     def __init__(
         self,
+        plugin: PluginValidateOffload,
         ts: TestSettings,
         task_role: TaskRole,
         perf_instance: task.ServerTask | task.ClientTask,
         tenant: bool,
     ):
+        self._plugin = plugin
         super().__init__(
             ts=ts,
             index=0,
@@ -163,7 +179,8 @@ class TaskValidateOffload(PluginTask):
             tenant=tenant,
         )
 
-        self.pod_name = f"tools-pod-{self.node_location}-{self.task_role.name.lower()}-validate-offload"
+        plugin_name = self.plugin.PLUGIN_NAME.replace("_", "-")
+        self.pod_name = f"tools-pod-{self.node_location}-{self.task_role.name.lower()}-{plugin_name}"
         self.in_file_template = tftbase.get_manifest("tools-pod.yaml.j2")
         self._perf_instance = perf_instance
         self.perf_pod_name = perf_instance.pod_name
@@ -333,6 +350,16 @@ class TaskValidateOffload(PluginTask):
             namespace=self.get_namespace(),
         )
 
+    def _run_tools_exec(
+        self,
+        cmd: str,
+        *,
+        may_fail: bool = False,
+    ) -> host.Result:
+        if self._is_dpu_mode:
+            return self._run_oc_exec_dpu(cmd, may_fail=may_fail)
+        return self.run_oc_exec(cmd, may_fail=may_fail)
+
     def _get_vf_info_from_pod(
         self, pod_name: str, ifname: str
     ) -> Optional[tuple[int, int]]:
@@ -468,7 +495,8 @@ class TaskValidateOffload(PluginTask):
 
             success_result = True
             msg: Optional[str] = None
-            ethtool_cmd = ""
+            stats_cmd = ""
+            stats_backend = self.plugin.STATISTICS_BACKEND
             parsed_data: dict[str, typing.Any] = {}
             data1 = ""
             data2 = ""
@@ -506,26 +534,20 @@ class TaskValidateOffload(PluginTask):
                     logger.info(
                         f"VF representor for {ifname} in pod {self.perf_pod_name} is {repr(vf_rep)}"
                     )
-                    ethtool_cmd = f"ethtool -S {vf_rep}"
+                    stats_cmd = self.plugin.statistics_command(vf_rep)
 
             self.ts.clmo_barrier.wait()
 
             if vf_rep is not None:
-                # Run ethtool - use DPU pod if in DPU mode
-                if self._is_dpu_mode:
-                    r1 = self._run_oc_exec_dpu(ethtool_cmd)
-                else:
-                    r1 = self.run_oc_exec(ethtool_cmd)
+                r1 = self._run_tools_exec(stats_cmd)
 
                 self.ts.event_client_finished.wait()
 
-                if self._is_dpu_mode:
-                    r2 = self._run_oc_exec_dpu(ethtool_cmd)
-                else:
-                    r2 = self.run_oc_exec(ethtool_cmd)
+                r2 = self._run_tools_exec(stats_cmd)
 
-                parsed_data["ethtool_cmd_1"] = common.dataclass_to_dict(r1)
-                parsed_data["ethtool_cmd_2"] = common.dataclass_to_dict(r2)
+                parsed_data["statistics_backend"] = stats_backend
+                parsed_data[f"{stats_backend}_cmd_1"] = common.dataclass_to_dict(r1)
+                parsed_data[f"{stats_backend}_cmd_2"] = common.dataclass_to_dict(r2)
 
                 if r1.success:
                     data1 = r1.out
@@ -534,21 +556,32 @@ class TaskValidateOffload(PluginTask):
 
                 if not r1.success:
                     success_result = False
-                    msg = "ethtool command failed"
+                    msg = f"{stats_backend} statistics command failed"
                 elif not r2.success:
                     success_result = False
-                    msg = "ethtool command at end failed"
+                    msg = f"{stats_backend} statistics command at end failed"
 
-                if not ethtool_stat_get_startend(parsed_data, data1, "start"):
+                parsed_start = self.plugin.statistics_get_startend(
+                    parsed_data, data1, "start"
+                )
+                parsed_end = self.plugin.statistics_get_startend(
+                    parsed_data, data2, "end"
+                )
+
+                if not parsed_start:
                     if success_result:
                         success_result = False
-                        msg = "ethtool output cannot be parsed"
-                if not ethtool_stat_get_startend(parsed_data, data2, "end"):
+                        msg = f"{stats_backend} statistics output cannot be parsed"
+                if not parsed_end:
                     if success_result:
                         success_result = False
-                        msg = "ethtool output at end cannot be parsed"
+                        msg = (
+                            f"{stats_backend} statistics output at end cannot be parsed"
+                        )
 
                 logger.info(
+                    f"{stats_backend} statistics for pod {self.perf_pod_name} "
+                    f"on node {self.node_name}:\n"
                     f"rx_packet_start: {parsed_data.get('rx_start', 'N/A')}\n"
                     f"tx_packet_start: {parsed_data.get('tx_start', 'N/A')}\n"
                     f"rx_packet_end: {parsed_data.get('rx_end', 'N/A')}\n"
@@ -556,8 +589,8 @@ class TaskValidateOffload(PluginTask):
                 )
 
                 if success_result:
-                    m1 = check_no_traffic_on_vf_rep(parsed_data, "rx")
-                    m2 = check_no_traffic_on_vf_rep(parsed_data, "tx")
+                    m1 = check_no_traffic_on_vf_rep(parsed_data, "rx", stats_backend)
+                    m2 = check_no_traffic_on_vf_rep(parsed_data, "tx", stats_backend)
                     if m1 is not None or m2 is not None:
                         success_result = False
                         msg = m1 if m1 is not None else m2
@@ -566,7 +599,7 @@ class TaskValidateOffload(PluginTask):
                 success=success_result,
                 msg=msg,
                 plugin_metadata=self.get_plugin_metadata(),
-                command=ethtool_cmd,
+                command=stats_cmd,
                 result=parsed_data,
             )
 
@@ -589,7 +622,7 @@ class TaskValidateOffload(PluginTask):
 
         msg_suffix = f", {result.msg}" if result.msg is not None else ""
         logger.info(
-            f"validateOffload results on {self.perf_pod_name}: "
+            f"{self.plugin.PLUGIN_NAME} results on {self.perf_pod_name}: "
             f"success={result.success}{msg_suffix}"
         )
 

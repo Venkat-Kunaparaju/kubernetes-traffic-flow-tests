@@ -1163,7 +1163,15 @@ class Task(ABC):
             tft_result_builder.add_plugin(result)
 
         if not result.success:
-            logger.warn(f"Result of {type(self).__name__} failed: {result.eval_msg}")
+            if isinstance(result, PluginOutput):
+                metadata = result.plugin_metadata
+                result_name = (
+                    f"{metadata.plugin_name} plugin for {metadata.plugin_role} "
+                    f"on {metadata.node_name}"
+                )
+            else:
+                result_name = type(self).__name__
+            logger.warning(f"Result of {result_name} failed: {result.eval_msg}")
             logger.debug(
                 f"Failure details: pod={self.pod_name}, "
                 f"port={getattr(self, 'port', 'N/A')}, "

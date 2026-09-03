@@ -184,11 +184,12 @@ dpu_node_host_label: (40)
 18a. "args" - (Optional) Extra command-line arguments to pass to the test tool (iperf3, simple-tcp-server-client). Supported for iperf-tcp, iperf-udp, and simple test types. Can be a string or list of strings.
 19. "secondary_network_nad" - (Optional) The secondary network NAD for the client node. Overrides the connection-level `secondary_network_nad` for the client pod. Useful when server and client require different NADs.
 20. "name" - (Optional) list of plugin names
-    | Name             | Description          |
-    | ---------------- | -------------------- |
-    | measure_cpu      | Measure CPU Usage    |
-    | measure_power    | Measure Power Usage  |
-    | validate_offload | Verify OvS Offload   |
+    | Name                       | Description                      |
+    | -------------------------- | -------------------------------- |
+    | measure_cpu                | Measure CPU Usage                |
+    | measure_power              | Measure Power Usage              |
+    | validate_offload           | Verify OvS Offload               |
+    | ovs_doca_validate_offload  | Verify OVS-DOCA Offload          |
 21. "test_cases" - (Optional) Restrict a plugin to run only for the specified test cases. Uses the same format as the top-level `test_cases` field. By default, the plugin runs for every test case.
 22. "secondary_network_nad" - (Optional) - The name of the secondary network for multi-homing and multi-networkpolicies tests. For mandatory tests 27-31 it defaults to "tft-secondary" if not set and can be overridden per-node using the server/client level `secondary_network_nad` fields. Tests 70-79 instead use the generated NAD selected by each test case and do not use this option. The framework automatically creates and cleans up the regular secondary NAD when required. Subnets, MTU, and topology default to `10.193.0.0/16/26`, `1500`, and `layer3`, overridable via `TFT_SECONDARY_NAD_SUBNETS`, `TFT_SECONDARY_NAD_MTU`, and `TFT_SECONDARY_NAD_TOPOLOGY`.
 23. "resource_name" - (Optional) - The resource name for tests that require resource limit and requests to be set. This field is optional and will default to None if not set, but if secondary network nad is defined, traffic flow test tool will try to autopopulate resource_name based on the secondary+network_nad provided.
@@ -275,8 +276,8 @@ plugins:
 
 ## DPU Mode
 
-When running with a DPU (Data Processing Unit) cluster, the `validate_offload` plugin needs
-to query VF representors from the DPU cluster rather than the host. This is because in DPU
+When running with a DPU (Data Processing Unit) cluster, the offload validation plugins
+query VF representors from the DPU cluster rather than the host. This is because in DPU
 environments, VF representors reside on the DPU where OVS/OVN runs.
 
 ### Configuration
@@ -296,7 +297,15 @@ host worker node. For example, with NVIDIA DPUs, each DPU node has a label like:
 provisioning.dpu.nvidia.com/host: worker-node-name
 ```
 
-The plugin uses this label to find the correct DPU node for each worker node.
+The plugins use this label to find the correct DPU node for each worker node.
+
+Use `validate_offload` for generic `ethtool -S` statistics. For OVS-DOCA,
+select the derived `ovs_doca_validate_offload` plugin instead:
+
+```yaml
+plugins:
+  - name: ovs_doca_validate_offload
+```
 
 ### How It Works
 
@@ -309,8 +318,10 @@ The plugin uses this label to find the correct DPU node for each worker node.
 3. **VF Representor Lookup**: Uses `devlink port show` on the DPU to find the VF
    representor by matching `pfnum` and `vfnum` (vendor-agnostic).
 
-4. **Ethtool Stats**: Runs `ethtool -S` on the VF representor from the DPU tools pod
-   to verify hardware offload.
+4. **Offload Validation**: `validate_offload` runs `ethtool -S` on the VF
+   representor. `ovs_doca_validate_offload` reads the representor's
+   `sw_rx_packets` and `tx_packets` from OVSDB through the host-mounted
+   filesystem.
 
 ## Running the tests
 
