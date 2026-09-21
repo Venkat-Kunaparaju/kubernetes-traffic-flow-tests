@@ -1,5 +1,6 @@
 import dataclasses
 import enum
+import hashlib
 import ipaddress
 import json
 import logging
@@ -29,6 +30,7 @@ from ktoolbox.k8sClient import K8sClient
 
 import testConfig
 import tftbase
+import kubevirt
 
 from pluginbase import Plugin
 from testSettings import TestSettings
@@ -317,6 +319,8 @@ class Task(ABC):
         self.ts = ts
         self.tc = ts.cfg_descr.tc
         self._resource_name: Optional[str] = None
+        self._vmi_created = False
+        self._vmi_exec_error: Optional[str] = None
 
         if not self.tenant and self.tc.mode == ClusterMode.SINGLE:
             raise ValueError("Cannot have non-tenant Task when cluster mode is single")
@@ -368,6 +372,8 @@ class Task(ABC):
         return tftbase.get_manifest_renderpath(self.pod_name + ".yaml")
 
     def _get_node_secondary_network_nad(self) -> Optional[str]:
+        if self.is_vmi:
+            return self._vmi_node_config.secondary_network_nad
         if self.task_role == TaskRole.CLIENT and self.ts.test_case_id.info.is_same_node:
             (c_client,) = self.ts.connection.client
             if c_client.secondary_network_nad is not None:
@@ -443,7 +449,9 @@ class Task(ABC):
                 nad = f"{self.get_namespace()}/{nad}"
             return nad
         return (
-            self.node.effective_secondary_network_nad
+            (
+                self._vmi_node_config if self.is_vmi else self.node
+            ).effective_secondary_network_nad
             or self.ts.connection.effective_secondary_network_nad
         )
 
@@ -557,6 +565,7 @@ class Task(ABC):
             "cpu_limit": conn.cpu_limit or "",
             "mem_request": conn.mem_request or "",
             "mem_limit": conn.mem_limit or "",
+            **(self._get_vmi_template_args() if self.is_vmi else {}),
         }
 
     def _get_template_args_privileged_pod(self) -> bool:
@@ -604,7 +613,102 @@ class Task(ABC):
         return (
             self._network_type == "secondary"
             and self.ts.connection_mode != ConnectionMode.MNP_PRIMARY_DENY
-        ) or (self.pod_type == PodType.SRIOV and has_configured_secondary_network)
+        ) or (
+            (
+                self._vmi_node_config.sriov
+                if self.is_vmi
+                else self.pod_type == PodType.SRIOV
+            )
+            and has_configured_secondary_network
+        )
+
+    @property
+    def is_vmi(self) -> bool:
+        return (
+            isinstance(self, (ServerTask, ClientTask))
+            and self.ts.cfg_descr.get_tft().is_vm
+            and self.pod_type != PodType.HOSTBACKED
+            and bool(self.in_file_template)
+        )
+
+    @property
+    def vmi(self) -> kubevirt.VmiEndpoint:
+        return kubevirt.VmiEndpoint(self.client, self.get_namespace(), self.pod_name)
+
+    @property
+    def _vmi_node_config(self) -> testConfig.ConfNodeBase:
+        if self.task_role == TaskRole.CLIENT:
+            return self.ts.cfg_descr.get_client()
+        return self.ts.cfg_descr.get_server()
+
+    def _vmi_secondary_nads(self) -> tuple[str, ...]:
+        nads = self._get_pod_secondary_network_nads()
+        if self._vmi_node_config.sriov and not nads:
+            nad = self._vmi_node_config.default_network
+            if "/" not in nad:
+                nad = f"{self.get_namespace()}/{nad}"
+            return (nad,)
+        return nads
+
+    def _vmi_name(self) -> str:
+        identity = json.dumps(
+            [
+                self.node_name,
+                self.ts.connection.yamlidx,
+                self.index,
+                self.get_namespace(),
+                self._vmi_secondary_nads(),
+            ],
+        )
+        suffix = hashlib.sha256(identity.encode()).hexdigest()[:12]
+        return f"tft-vmi-{self.task_role.name.lower()}-{suffix}"
+
+    def _get_vmi_template_args(self) -> dict[str, str | list[str] | bool]:
+        nads = self._vmi_secondary_nads()
+        resource_name = self.get_resource_name()
+        sriov_quantity = 0
+        if self._vmi_node_config.sriov:
+            for nad in nads:
+                namespace, name = nad.split("/", 1)
+                data = self.client.oc_get(
+                    f"network-attachment-definition/{name}", namespace=namespace
+                )
+                nad_resource = (
+                    (data or {})
+                    .get("metadata", {})
+                    .get("annotations", {})
+                    .get(kubevirt.RESOURCE_ANNOTATION)
+                )
+                configured_resource = self.ts.connection.resource_name
+                if not nad_resource or (
+                    configured_resource and nad_resource != configured_resource
+                ):
+                    raise ValueError(
+                        f"SR-IOV VMI network {nad} must advertise resource_name "
+                        f"{resource_name!r}; found {nad_resource!r}"
+                    )
+                sriov_quantity += int(nad_resource == resource_name)
+        tft = self.ts.cfg_descr.get_tft()
+        primary_udn = self.get_namespace() == tftbase.get_udn_namespace(
+            tft.namespace
+        ) and any(tc.is_udn_primary for tc in tft.test_cases)
+        quantity = len(nads) + int(primary_udn)
+        if self._vmi_node_config.sriov:
+            quantity = sriov_quantity + 1 if primary_udn else 0
+        return {
+            "vm_image": _j(tftbase.get_tft_vm_image()),
+            "vm_cpus": str(tftbase.get_tft_vm_cpus()),
+            "vm_network_binding": _j(tftbase.get_tft_vm_network_binding()),
+            "has_vm_network_binding": bool(tftbase.get_tft_vm_network_binding()),
+            "vm_primary_udn": primary_udn,
+            "vm_secondary_nads": [_j(nad) for nad in nads],
+            "vm_sriov": self._vmi_node_config.sriov,
+            "vm_resource_quantity": _j(str(quantity)),
+            "has_vm_resource": bool(resource_name and quantity),
+            "vm_memory": _j(
+                self.ts.connection.mem_request or self.ts.connection.mem_limit or "1Gi"
+            ),
+        }
 
     def render_pod_file(self, log_info: str) -> None:
         self.render_file(
@@ -685,6 +789,19 @@ class Task(ABC):
         pod_name: Optional[str] = None,
         namespace: Optional[str] | common._MISSING_TYPE = common.MISSING,
     ) -> host.Result:
+        if self.is_vmi and (pod_name is None or pod_name == self.pod_name):
+            resolved_namespace = self._get_run_oc_namespace(namespace)
+            if resolved_namespace != self.get_namespace():
+                raise ValueError("Guest execution must use the endpoint namespace")
+            result = self.vmi.run(
+                cmd,
+                timeout=max(600, self.get_duration() * 2 + 60),
+                may_fail=may_fail,
+                die_on_error=die_on_error,
+            )
+            if result.cancelled or result.returncode in (126, 127):
+                self._vmi_exec_error = result.err
+            return result
         if pod_name is None:
             pod_name = self.pod_name
         return self.client.oc_exec(
@@ -717,6 +834,12 @@ class Task(ABC):
         match their exact NAD in Multus network-status. Other tests retain the
         status.podIP or regular secondary-network behavior.
         """
+        if self.is_vmi:
+            if self.uses_secondary_ip:
+                return self.vmi.ip(self._get_effective_secondary_network_nad())
+            if self._vmi_node_config.sriov:
+                return self.vmi.ip(self._vmi_secondary_nads()[0])
+            return self.vmi.ip()
         y = self.run_oc_get(f"pod/{self.pod_name}", die_on_error=True)
         pod_ip = None
         try:
@@ -760,6 +883,8 @@ class Task(ABC):
         return pod_ip
 
     def get_primary_ip(self) -> str:
+        if self.is_vmi:
+            return self.vmi.ip()
         y = self.run_oc_get(f"pod/{self.pod_name}", die_on_error=True)
         pod_ip = None
         if y:
@@ -770,6 +895,8 @@ class Task(ABC):
 
     def get_secondary_ip(self) -> str:
         """Return the secondary target IP, matching the exact NAD for UDN tests."""
+        if self.is_vmi:
+            return self.vmi.ip(self._get_effective_secondary_network_nad())
         if self.ts.test_case_id.is_udn:
             ip_address = self.get_pod_ip()
             logger.info(f"Secondary IP: {ip_address}")
@@ -1111,6 +1238,11 @@ class Task(ABC):
         to.finish(timeout=5)
 
     def setup_pod(self) -> None:
+        if self.is_vmi:
+            self._vmi_created = self.vmi.setup(
+                self.out_file_yaml, tftbase.get_tft_pod_bringup_timeout()
+            )
+            return
         # Check if pod already exists
         v = self.run_oc_get(f"pod/{self.pod_name}", may_fail=True)
         if v is None:
@@ -1174,6 +1306,10 @@ class Task(ABC):
         result = self._result
 
         if isinstance(result, tftbase.FlowTestOutput):
+            if self._vmi_exec_error is not None:
+                result = dataclasses.replace(
+                    result, success=False, msg=self._vmi_exec_error
+                )
             tft_result_builder.set_flow_test(result)
             if result.success:
                 log_level = logging.INFO
@@ -1348,12 +1484,17 @@ class ServerTask(Task, ABC):
         self.in_file_template = in_file_template
         self.pod_name = pod_name
         self.server_stdout: Optional[str] = None
+        if self.is_vmi:
+            self.pod_name = self._vmi_name()
+            self.in_file_template = tftbase.get_manifest("vmi.yaml.j2")
 
     def _get_template_args_port(self) -> str:
         return str(self.port)
 
     @property
     def _svc_backend_label(self) -> str:
+        if self.is_vmi:
+            return f"{self.pod_name}-{self.port}"
         backend = "host" if self.pod_type == PodType.HOSTBACKED else "pod"
         prefix = (
             f"{self._network_type}-{backend}"
@@ -1398,8 +1539,9 @@ class ServerTask(Task, ABC):
                 time.sleep(5)
         else:
             # Kubernetes/OpenShift scenario
+            resource = kubevirt.VMI_RESOURCE if self.is_vmi else "pod"
             r = self.run_oc(
-                f"wait --for=condition=ready pod/{self.pod_name} --timeout=1m"
+                f"wait --for=condition=ready {resource}/{self.pod_name} --timeout=1m"
             )
         if not r:
             logger.error(f"Failed to start server {self.pod_name}: {r.err}")
@@ -1531,6 +1673,19 @@ class ServerTask(Task, ABC):
         else:
             if not skip_pod_setup:
                 self.setup_pod()
+                if self.is_vmi and self.ts.connection.test_type == TestType.HTTP:
+                    self.run_oc_exec(
+                        "mkdir -p /etc/kubernetes-traffic-flow-tests && "
+                        "printf 'kubernetes-traffic-flow-tests\\n' > "
+                        "/etc/kubernetes-traffic-flow-tests/data",
+                        die_on_error=True,
+                    )
+                if self.is_vmi and self.exec_persistent and self._vmi_created:
+                    persistent_cmd = shlex.join(self.cmd_line_args(for_template=True))
+                    self.run_oc_exec(
+                        f"nohup {persistent_cmd} > /tmp/tft-server-{self.port}.log 2>&1 < /dev/null &",
+                        die_on_error=True,
+                    )
             ca_cmd = self._create_setup_operation_get_cancel_action_cmd()
             cmd = f"{th_cmd}"
             cancel_cmd = f"{ca_cmd}"
@@ -1604,7 +1759,10 @@ class ServerTask(Task, ABC):
             return _run_cmd(cmd, capture_server_output=True)
 
         def _cancel_action() -> None:
-            if self.server_stdout is None:
+            if (
+                self.server_stdout is None
+                and self.connection_mode == ConnectionMode.EXTERNAL_IP
+            ):
                 r = self.lh.run(
                     f"podman logs {self.pod_name}",
                     log_level_fail=logging.DEBUG,
@@ -1663,6 +1821,9 @@ class ClientTask(Task, ABC):
         self.target_access_mode = ts.target_access_mode
         self.in_file_template = in_file_template
         self.pod_name = pod_name
+        if self.is_vmi:
+            self.pod_name = self._vmi_name()
+            self.in_file_template = tftbase.get_manifest("vmi.yaml.j2")
 
     def create_egressip(self) -> None:
         conn = self.ts.connection

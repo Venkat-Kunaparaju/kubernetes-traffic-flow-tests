@@ -1,0 +1,89 @@
+apiVersion: kubevirt.io/v1
+kind: VirtualMachineInstance
+metadata:
+  namespace: {{ name_space }}
+  name: {{ pod_name }}
+  labels:
+    tft-tests: {{ label_tft_tests }}
+    tft-vmi: "true"
+    tft-pod-name: {{ pod_name }}
+    tft-network: {% if vm_secondary_nads %}secondary{% else %}primary{% endif %}
+spec:
+  readinessProbe:
+    exec:
+      command: ["/usr/local/libexec/tft-guest-exec", "/bin/sh", "-c", "test -f /var/lib/cloud/instance/boot-finished"]
+    periodSeconds: 5
+    timeoutSeconds: 5
+  nodeSelector:
+    kubernetes.io/hostname: {{ node_name }}
+  tolerations:
+  - key: "node.kubernetes.io/unschedulable"
+    effect: "NoSchedule"
+    operator: "Exists"
+  domain:
+    cpu:
+      cores: {{ vm_cpus }}
+    memory:
+      guest: {{ vm_memory }}
+    resources:
+      requests:
+        memory: {{ vm_memory }}{% if cpu_request %}
+        cpu: {{ cpu_request }}{% endif %}{% if has_vm_resource %}
+        {{ resource_name }}: {{ vm_resource_quantity }}{% endif %}{% if cpu_limit or mem_limit or has_vm_resource %}
+      limits:{% if cpu_limit %}
+        cpu: {{ cpu_limit }}{% endif %}{% if mem_limit %}
+        memory: {{ mem_limit }}{% endif %}{% if has_vm_resource %}
+        {{ resource_name }}: {{ vm_resource_quantity }}{% endif %}{% endif %}
+    devices:
+      rng: {}
+      disks:
+      - name: root
+        disk:
+          bus: virtio
+      - name: cloudinit
+        disk:
+          bus: virtio
+      interfaces:
+      - name: default{% if has_vm_network_binding %}
+        binding:
+          name: {{ vm_network_binding }}{% elif vm_primary_udn %}
+        binding:
+          name: l2bridge{% else %}
+        bridge: {}{% endif %}{% for nad in vm_secondary_nads %}
+      - name: tft-net-{{ loop.index0 }}{% if vm_sriov %}
+        sriov: {}{% elif has_vm_network_binding %}
+        binding:
+          name: {{ vm_network_binding }}{% else %}
+        bridge: {}{% endif %}{% endfor %}
+  networks:
+  - name: default
+    pod: {}{% for nad in vm_secondary_nads %}
+  - name: tft-net-{{ loop.index0 }}
+    multus:
+      networkName: {{ nad }}{% endfor %}
+  volumes:
+  - name: root
+    containerDisk:
+      image: {{ vm_image }}
+      imagePullPolicy: {{ image_pull_policy }}
+  - name: cloudinit
+    cloudInitNoCloud:
+      userData: |
+        #cloud-config
+        write_files:
+        - path: /usr/local/libexec/tft-guest-exec
+          permissions: "0755"
+          content: |
+            #!/bin/sh
+            exec "$@"
+        runcmd:
+        - [setsebool, -P, virt_qemu_ga_run_unconfined, "on"]
+        - [chcon, -t, virt_qemu_ga_unconfined_exec_t, /usr/local/libexec/tft-guest-exec]
+        - [systemctl, enable, --now, qemu-guest-agent]
+      networkData: |
+        version: 2
+        ethernets:
+          ethernet:
+            match:
+              name: "e*"
+            dhcp4: true

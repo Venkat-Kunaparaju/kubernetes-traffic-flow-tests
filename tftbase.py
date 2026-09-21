@@ -25,6 +25,9 @@ logger = common.ExtendedLogger("tft." + __name__)
 ENV_TFT_TEST_IMAGE = "TFT_TEST_IMAGE"
 ENV_TFT_RDMA_TEST_IMAGE = "TFT_RDMA_TEST_IMAGE"
 ENV_TFT_IMAGE_PULL_POLICY = "TFT_IMAGE_PULL_POLICY"
+ENV_TFT_VM_IMAGE = "TFT_VM_IMAGE"
+ENV_TFT_VM_CPUS = "TFT_VM_CPUS"
+ENV_TFT_VM_NETWORK_BINDING = "TFT_VM_NETWORK_BINDING"
 
 ENV_TFT_PRIVILEGED_POD = "TFT_PRIVILEGED_POD"
 
@@ -192,6 +195,29 @@ def get_tft_image_pull_policy() -> str:
             s = "IfNotPresent"
     logger.info(f"env: {ENV_TFT_IMAGE_PULL_POLICY}={shlex.quote(s)}")
     return s
+
+
+@functools.cache
+def get_tft_vm_image() -> str:
+    image = get_environ(ENV_TFT_VM_IMAGE) or "quay.io/containerdisks/fedora:latest"
+    logger.info(f"env: {ENV_TFT_VM_IMAGE}={shlex.quote(image)}")
+    return image
+
+
+@functools.cache
+def get_tft_vm_cpus() -> int:
+    cpus = int(get_environ(ENV_TFT_VM_CPUS) or "1")
+    if cpus < 1:
+        raise ValueError(f"{ENV_TFT_VM_CPUS} must be a positive integer")
+    logger.info(f"env: {ENV_TFT_VM_CPUS}={cpus}")
+    return cpus
+
+
+@functools.cache
+def get_tft_vm_network_binding() -> str:
+    binding = get_environ(ENV_TFT_VM_NETWORK_BINDING) or ""
+    logger.info(f"env: {ENV_TFT_VM_NETWORK_BINDING}={shlex.quote(binding)}")
+    return binding
 
 
 @functools.cache

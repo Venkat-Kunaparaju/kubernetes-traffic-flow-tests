@@ -42,6 +42,7 @@ tft:
   - name: "(1)"
     namespace: "(2)"
     runtime_class_name: "(2a)"
+    is_vm: "(2b)"
     # test cases can be specified individually i.e "1,2,POD_TO_HOST_SAME_NODE,6" or as a range i.e. "POD_TO_POD_SAME_NODE-9,15-19"
     test_cases: "(3)"
     duration: "(4)"
@@ -99,6 +100,8 @@ dpu_node_host_label: (44)
 2. "namespace" - The k8s namespace where the test pods will be run on
 2a. "runtime_class_name": (Optional) The Kubernetes RuntimeClass to use for eligible traffic
   pods in this test, for example `kata`. If unset, those pods use the cluster default runtime.
+2b. "is_vm": (Optional) Use KubeVirt VMIs for traffic endpoints. Defaults to false.
+  Cannot be combined with `runtime_class_name`. See [KubeVirt guests](#running-traffic-in-kubevirt-guests).
 3. "test_cases" - A list of the tests that can be run. This can be either a string
      that possibly contains ranges (comma separated, ranged separated by '-'), or a
      YAML list.
@@ -231,6 +234,87 @@ dpu_node_host_label: (44)
   are detected based on the files we find at /root/kubeconfig.*.
 44. "dpu_node_host_label": (Required for DPU mode) The label on DPU nodes that identifies
   which host worker node they belong to. For NVIDIA DPUs, use `provisioning.dpu.nvidia.com/host`.
+
+### Running traffic in KubeVirt guests
+
+Set `is_vm: true` on a `tft` test to render `manifests/vmi.yaml.j2` for its
+server and client traffic endpoints:
+
+```yaml
+tft:
+  - name: "KubeVirt traffic"
+    namespace: "ft"
+    is_vm: true
+    test_cases: "1,2"
+    duration: 30
+    pre_provision: true
+    connections:
+      - type: "iperf-tcp"
+        mem_request: "2Gi"
+        server:
+          - name: "worker-1"
+        client:
+          - name: "worker-2"
+```
+
+Same-node tests create two VMIs on the server node; different-node tests place the
+client on its configured node. With both cases and `pre_provision: true`, each
+connection instance uses three VMIs: a shared server and a client on each node.
+Host-network endpoints and external Podman servers keep their existing behavior.
+TFT deletes its VMIs before network cleanup; `--no-cleanup` retains them.
+
+The manifest uses an ephemeral container disk and cloud-init. Its small VM-only
+configuration surface follows the existing environment-variable conventions:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `TFT_VM_IMAGE` | `quay.io/containerdisks/fedora:latest` | Public Fedora container disk; no pull secret is needed for this default. |
+| `TFT_VM_CPUS` | `1` | Positive number of guest vCPU cores. |
+| `TFT_VM_NETWORK_BINDING` | unset | Installed KubeVirt binding plugin for non-SR-IOV interfaces. Defaults to bridge, or `l2bridge` on the primary interface in a primary UDN namespace. |
+
+Existing connection `cpu_request`, `cpu_limit`, `mem_request`, and `mem_limit`
+configure VMI domain resources. Guest memory comes from `mem_request`, then
+`mem_limit`, then `1Gi`. `TFT_IMAGE_PULL_POLICY` and `TFT_POD_BRINGUP_TIMEOUT` also
+apply; allow enough bring-up time for image pulls and guest boot. For other VM
+hardware or cloud-init changes, provide `vmi.yaml.j2` through the existing
+`TFT_MANIFESTS_OVERRIDES` directory. Pod privileges/capabilities do not configure
+guest security.
+
+Namespace, placement, network labels, UDN/CUDN selection, per-node secondary NAD
+overrides, and `resource_name` come from the usual TFT settings. Pre-provisioned
+VMIs receive the secondary UDN attachments required in their namespace. Endpoint
+`sriov: true` selects native SR-IOV on those attachments; `default_network` supplies
+the NAD when no secondary network is configured. SR-IOV NADs must advertise
+`k8s.v1.cni.cncf.io/resourceName`, matching `resource_name` when it is set.
+KubeVirt allocates those devices. Install the selected binding plugins on the
+cluster, including `l2bridge` for primary UDNs. Guest addresses are matched to the
+selected network in VMI status; address selection currently requires IPv4.
+
+Cloud-init enables DHCP on Ethernet interfaces, starts the QEMU guest agent, and
+enables Fedora's `virt_qemu_ga_run_unconfined` SELinux boolean. A dedicated
+`/usr/local/libexec/tft-guest-exec` wrapper is labeled
+`virt_qemu_ga_unconfined_exec_t`, allowing readiness and traffic commands to enter
+the guest agent's unconfined execution domain while SELinux stays enforcing.
+The boolean alone does not permit arbitrary guest commands. Readiness waits for
+cloud-init completion. TFT then executes commands
+through `virsh qemu-agent-command` in the owning virt-launcher Pod's `compute`
+container, preserving stdout, stderr, and exit status. No SSH setup is needed.
+
+The public Fedora image is a base OS, not the TFT Pod image. **Prepare a container
+disk with the tools for your chosen tests and set `TFT_VM_IMAGE` accordingly.**
+TFT installs no packages: the guest needs cloud-init, QEMU guest agent with
+`guest-exec`/`guest-exec-status` enabled, GNU `timeout`, `ss`, `grep`, and `killall`,
+plus `iperf3`, `netperf`/`netserver`, `curl`/`python3`, RDMA tools, or TFT's
+`simple-tcp-server-client` as appropriate. Persistent servers also use `nohup`.
+HTTP setup creates its expected response file. Guest firewall rules must permit
+the selected test traffic. Custom manifest overrides must also provision the
+guest-execution wrapper used by the backend and readiness probe; configure its
+permissions for the guest OS security policy.
+
+The kubeconfig needs VMI read/create/patch/delete/watch, launcher Pod read/exec,
+and the usual TFT network permissions. Pod interface inspection plugins
+(`validate_offload`, `ovs_doca_validate_offload`, `ping_mgmt_port`) are rejected in
+VM mode; node CPU/power monitoring remains available.
 
 ### Running traffic pods with a RuntimeClass
 

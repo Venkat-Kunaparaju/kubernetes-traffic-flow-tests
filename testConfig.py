@@ -808,10 +808,20 @@ class ConfTest(StructParseBaseNamed):
     connections: tuple[ConfConnection, ...]
     logs: pathlib.Path
     udn_primary_network: ConfUdnNetwork
+    is_vm: bool = False
 
     def __post_init__(self) -> None:
         for c in self.connections:
             c._owner_reference.init(self)
+            if self.is_vm and any(
+                p.name
+                in ("validate_offload", "ovs_doca_validate_offload", "ping_mgmt_port")
+                for p in c.plugins
+            ):
+                raise self.value_error(
+                    "VMI endpoints do not support Pod interface inspection plugins",
+                    key="is_vm",
+                )
 
     @property
     def config(self) -> "ConfConfig":
@@ -827,6 +837,7 @@ class ConfTest(StructParseBaseNamed):
             "privileged_pod": self.privileged_pod,
             "capabilities_pod": self.capabilities_pod,
             "runtime_class_name": self.runtime_class_name,
+            **({"is_vm": True} if self.is_vm else {}),
             "connections": [c.serialize() for c in self.connections],
             "logs": str(self.logs),
             "udn_primary_network": self.udn_primary_network.serialize(),
@@ -886,6 +897,15 @@ class ConfTest(StructParseBaseNamed):
                 check=validate_runtime_class_name,
             )
 
+            is_vm = common.structparse_pop_bool(
+                varg.for_key("is_vm"),
+                default=False,
+            )
+            if is_vm and runtime_class_name:
+                raise pctx.value_error(
+                    "cannot be combined with runtime_class_name", key="is_vm"
+                )
+
             connections = common.structparse_pop_objlist(
                 varg.for_key("connections"),
                 construct=lambda pctx2: ConfConnection.parse(
@@ -924,6 +944,7 @@ class ConfTest(StructParseBaseNamed):
             connections=connections,
             logs=pathlib.Path(logs),
             udn_primary_network=udn_primary_network,
+            is_vm=is_vm,
         )
 
     @property
