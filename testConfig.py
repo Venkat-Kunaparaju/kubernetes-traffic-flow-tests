@@ -828,6 +828,25 @@ class ConfTest(StructParseBaseNamed):
     def __post_init__(self) -> None:
         for c in self.connections:
             c._owner_reference.init(self)
+            if any(tc.is_vm for tc in c.get_conn_test_cases()) and any(
+                server.persistent for server in c.server
+            ):
+                raise c.value_error(
+                    "VMI endpoints do not support persistent servers", key="server"
+                )
+            if any(
+                p.name
+                in ("validate_offload", "ovs_doca_validate_offload", "ping_mgmt_port")
+                and any(
+                    tc.is_vm and p.applies_to_test_case(tc)
+                    for tc in c.get_conn_test_cases()
+                )
+                for p in c.plugins
+            ):
+                raise self.value_error(
+                    "VMI endpoints do not support Pod interface inspection plugins",
+                    key="connections",
+                )
 
     @property
     def config(self) -> "ConfConfig":

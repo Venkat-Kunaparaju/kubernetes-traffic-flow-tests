@@ -397,6 +397,8 @@ IPERF_TCP:
   Reverse:
     threshold: 10
   id: 91
+- id: 92
+- id: 93
 IPERF_UDP:
 - Normal:
     threshold: 5
@@ -793,3 +795,5 @@ IPERF_UDP:
   Reverse:
     threshold: 5
   id: 91
+- id: 92
+- id: 93

@@ -415,6 +415,8 @@ IPERF_TCP:
       threshold: 18
     Reverse:
       threshold: 10
+  - id: UDN_PRIMARY_VM_TO_VM_SAME_NODE
+  - id: UDN_PRIMARY_VM_TO_VM_DIFF_NODE
 IPERF_UDP:
   - id: POD_TO_POD_SAME_NODE
     Normal:
@@ -811,3 +813,5 @@ IPERF_UDP:
       threshold: 5
     Reverse:
       threshold: 5
+  - id: UDN_PRIMARY_VM_TO_VM_SAME_NODE
+  - id: UDN_PRIMARY_VM_TO_VM_DIFF_NODE

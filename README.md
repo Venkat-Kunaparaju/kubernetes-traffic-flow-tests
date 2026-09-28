@@ -191,6 +191,8 @@ dpu_node_host_label: (44)
     | 89 | UDN_LAYER2_POD_TO_POD_MNP_ALLOW |
     | 90 | CUDN_LOCALNET_POD_TO_POD_MNP_DENY |
     | 91 | CUDN_LOCALNET_POD_TO_POD_MNP_ALLOW |
+    | 92 | UDN_PRIMARY_VM_TO_VM_SAME_NODE |
+    | 93 | UDN_PRIMARY_VM_TO_VM_DIFF_NODE |
 4. "duration" - The duration that each individual test will run for.
 5. "pre_provision" - (Optional) Whether to pre-provision all pods and services once before the test run begins, rather than creating and tearing them down per test case. Defaults to false. Takes in "true/false".
 6. "name" - This is the connection name. Any string value to identify the connection.
@@ -204,7 +206,7 @@ dpu_node_host_label: (44)
 9. "reverse" - (Optional) Whether reverse-direction test should run when supported. Defaults to true. Currently, reverse execution is only supported for iperf-tcp. Takes in "true/false".
 10. "duration" - (Optional) Override the test duration for this connection only, in seconds. If omitted, the tft-level duration is used.
 11. "name" - The node name of the server.
-12. "persistent" - Whether to have the server pod persist after the test. Takes in "true/false"
+12. "persistent" - Whether to have the server pod persist after the test. Takes in "true/false". Unsupported for VM test cases.
 13. "sriov" - Whether SRIOV should be used for the server pod. Takes in "true/false"
 14. "default_network" - (Optional) The name of the default network that the sriov pod would use.
 14a. "pod_port" - (Optional) The base port for pod-type servers. Defaults to 5201. When multiple connections are configured, each connection should use a unique port to avoid service conflicts.
@@ -301,6 +303,88 @@ test cases. A case is provisioned and executed only for connections that select
 it, including when `pre_provision: true`. Cases that no connection selects do not
 trigger network setup. Existing configurations without connection-level
 `test_cases` continue to use the TFT-level selection for every connection.
+
+### Running traffic in KubeVirt guests
+
+Tests with `VM` in their name use VMIs rendered from `manifests/vmi.yaml.j2`.
+Select them by name or ID through `test_cases`; `"*"` also includes VM tests.
+For example:
+
+```yaml
+tft:
+  - name: "KubeVirt traffic"
+    namespace: "ft"
+    test_cases:
+      - UDN_PRIMARY_VM_TO_VM_SAME_NODE
+      - UDN_PRIMARY_VM_TO_VM_DIFF_NODE
+    duration: 30
+    pre_provision: true
+    connections:
+      - type: "iperf-tcp"
+        mem_request: "2Gi"
+        server:
+          - name: "worker-1"
+        client:
+          - name: "worker-2"
+```
+
+These examples use the primary UDN configured through
+`udn_primary_network`. Same-node cases place both endpoints on the server node;
+different-node cases use their respective nodes. With pre-provisioning, this
+example shares one server VMI between two client VMIs. Pod and VM cases can
+coexist in one entry and provision separate endpoints. `--no-cleanup` retains
+VMIs; evaluation thresholds can be set in `eval-config.yaml`.
+
+VM servers provision ClusterIP and NodePort Services using the guest server port,
+with separate names from Pod Services. The shared LoadBalancer Service helper
+also supports VM backends. Services select the `tft-pod-name` label propagated
+from the VMI to its virt-launcher Pod. Current VM cases still use direct guest IPs.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `TFT_VM_PRIMARY_INTERFACE` | `bridge` | Primary interface: `bridge`, `sriov`, or `binding:<name>`. |
+| `TFT_VM_SECONDARY_INTERFACE` | `bridge` | Same choices for all secondary interfaces. |
+
+`bridge` uses KubeVirt's built-in bridge binding; `binding:<name>` selects a
+registered plugin. Choose a binding compatible with your primary UDN.
+`sriov` requires VFIO-bound VFs and guest NIC drivers; primary-interface VFIO
+also requires cluster integration to expose the PCI device to KubeVirt.
+Secondary attachments use `secondary_network_nad`. As with Pods, `resource_name`
+is taken from configuration or discovered from the configured secondary NAD's
+`k8s.v1.cni.cncf.io/resourceName` annotation.
+
+VM endpoints also use these shared configuration fields:
+
+| Setting | VM behavior |
+| --- | --- |
+| Server `pod_port` | Guest server's base listening port (default `5201`), plus the instance index. The client uses the same port. `host_port` is for host-network endpoints. |
+| Server `persistent` | Unsupported for VM endpoints; leave `false`. VMI pre-provisioning is still supported. |
+| Server/client `args` | Extra test-tool arguments where supported, such as iperf and simple tests. |
+| Connection `type`, `instances`, `reverse` | Select the traffic tool, instance count, and reverse runs where supported. |
+| `duration` | Sets test duration; a connection value overrides the TFT-level value. |
+| `cpu_request`, `cpu_limit`, `mem_request`, `mem_limit` | For VM endpoints, these fields also determine guest hardware: memory uses `mem_request`, then `mem_limit`, then `1Gi`; CPU cores use `cpu_request`, then `cpu_limit`, then `1`, rounded up to a whole core with a minimum of one. CPU requests and limits retain their configured values. Pod behavior is unchanged. |
+
+Node names, namespace, `udn_primary_network`, `secondary_network_nad`, and
+`resource_name` use the shared settings described above.
+`TFT_IMAGE_PULL_POLICY` and `TFT_POD_BRINGUP_TIMEOUT` also apply. Pod security
+settings, `runtime_class_name`, `sriov`, and `default_network` do not configure
+VM guest security or bindings.
+
+The template fixes the disk image to `quay.io/containerdisks/fedora:latest` and
+configures Fedora cloud-init, DHCP, and QEMU guest-agent execution through the
+virt-launcher Pod. **Install the required traffic tools in the guest** using a
+`vmi.yaml.j2` override in `TFT_MANIFESTS_OVERRIDES`; the supplied template installs
+no packages. Preserve its guest-execution wrapper and prerequisites. Pod image
+variables do not select the VM image. See the template comments for boot setup.
+
+Guest address selection requires IPv4. The network or binding must supply DHCP
+replies, or the template override must configure guest addresses explicitly.
+Allow test traffic through the guest firewall and grant the kubeconfig VMI
+management, launcher Pod read/exec, and TFT network permissions.
+
+Pod inspection plugins (`validate_offload`, `ovs_doca_validate_offload`,
+`ping_mgmt_port`) cannot run on VM cases; restrict them to Pod cases using the
+plugin's `test_cases` field. Node CPU/power monitoring remains available.
 
 ### Running traffic pods with a RuntimeClass
 

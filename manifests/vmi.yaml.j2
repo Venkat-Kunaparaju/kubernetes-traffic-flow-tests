@@ -1,0 +1,123 @@
+# SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: kubevirt.io/v1
+kind: VirtualMachineInstance
+metadata:
+  namespace: {{ name_space }}
+  name: {{ pod_name }}
+  labels:
+    tft-tests: {{ label_tft_tests }}
+    tft-pod-name: {{ pod_name }}
+    tft-vmi: "true"
+spec:
+  # Wait for guest setup through the guest agent before starting test commands.
+  readinessProbe:
+    exec:
+      command: ["/usr/local/libexec/tft-guest-exec", "/bin/sh", "-c", "test -f /var/lib/cloud/instance/boot-finished"]
+    periodSeconds: 5
+    timeoutSeconds: 5
+  nodeSelector:
+    kubernetes.io/hostname: {{ node_name }}
+  tolerations:
+  - key: "node.kubernetes.io/unschedulable"
+    effect: "NoSchedule"
+    operator: "Exists"
+  domain:
+    cpu:
+      cores: {{ vm_cpus }}
+    memory:
+      guest: {{ vm_memory }}
+    resources:
+      requests:
+        memory: {{ vm_memory }}
+{% if cpu_request %}
+        cpu: {{ cpu_request }}
+{% endif %}
+{% if has_vm_resource %}
+        {{ resource_name }}: {{ vm_resource_quantity }}
+{% endif %}
+{% if cpu_limit or mem_limit or has_vm_resource %}
+      limits:
+{% if cpu_limit %}
+        cpu: {{ cpu_limit }}
+{% endif %}
+{% if mem_limit %}
+        memory: {{ mem_limit }}
+{% endif %}
+{% if has_vm_resource %}
+        {{ resource_name }}: {{ vm_resource_quantity }}
+{% endif %}
+{% endif %}
+    devices:
+      rng: {}
+      disks:
+      - name: root
+        disk:
+          bus: virtio
+      - name: cloudinit
+        disk:
+          bus: virtio
+      interfaces:
+      # Primary and secondary binding choices are independent of network selection.
+      - name: default
+{% if vm_primary_interface == "sriov" %}
+        sriov: {}
+{% elif vm_primary_interface == "bridge" %}
+        bridge: {}
+{% else %}
+        binding:
+          name: {{ vm_primary_binding }}
+{% endif %}
+{% for nad in vm_secondary_nads %}
+      - name: tft-net-{{ loop.index0 }}
+{% if vm_secondary_interface == "sriov" %}
+        sriov: {}
+{% elif vm_secondary_interface == "bridge" %}
+        bridge: {}
+{% else %}
+        binding:
+          name: {{ vm_secondary_binding }}
+{% endif %}
+{% endfor %}
+  networks:
+  # KubeVirt's UDN integration maps this to the namespace's primary UDN, if present.
+  - name: default
+    pod: {}
+{% for nad in vm_secondary_nads %}
+  - name: tft-net-{{ loop.index0 }}
+    multus:
+      networkName: {{ nad }}
+{% endfor %}
+  volumes:
+  - name: root
+    containerDisk:
+      # Guest setup below relies on Fedora's SELinux policy and systemd services.
+      image: quay.io/containerdisks/fedora:latest
+      imagePullPolicy: {{ image_pull_policy }}
+  - name: cloudinit
+    # Supply guest boot configuration through a disk; no metadata service is needed.
+    cloudInitNoCloud:
+      userData: |
+        #cloud-config
+        # A labeled entry point lets guest-agent commands use Fedora's unconfined domain.
+        write_files:
+        - path: /usr/local/libexec/tft-guest-exec
+          permissions: "0755"
+          content: |
+            #!/bin/sh
+            exec "$@"
+        runcmd:
+        - [setsebool, -P, virt_qemu_ga_run_unconfined, "on"]
+        - [chcon, -t, virt_qemu_ga_unconfined_exec_t, /usr/local/libexec/tft-guest-exec]
+        # TFT controls the guest through QEMU's channel without SSH connectivity.
+        - [systemctl, enable, --now, qemu-guest-agent]
+      networkData: |
+        version: 2
+        ethernets:
+          ethernet:
+            # Cover common guest NIC names without assuming interface numbering.
+            match:
+              name: "e*"
+            # The binding or attached network must supply DHCP replies.
+            dhcp4: true
