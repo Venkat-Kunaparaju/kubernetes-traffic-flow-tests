@@ -14,7 +14,15 @@ spec:
   # Wait for guest setup through the guest agent before starting test commands.
   readinessProbe:
     exec:
-      command: ["/usr/local/libexec/tft-guest-exec", "/bin/sh", "-c", "test -f /var/lib/cloud/instance/boot-finished"]
+      command:
+      - /usr/local/libexec/tft-guest-exec
+      - /bin/sh
+      - -c
+      - |
+        test -f /var/lib/cloud/instance/boot-finished || exit 1
+        for command in {{ vm_commands | join(' ') }}; do
+          command -v "$command" >/dev/null || exit 1
+        done
     periodSeconds: 5
     timeoutSeconds: 5
   nodeSelector:
@@ -100,6 +108,10 @@ spec:
     cloudInitNoCloud:
       userData: |
         #cloud-config
+        packages:
+{% for package in vm_packages %}
+        - {{ package }}
+{% endfor %}
         # A labeled entry point lets guest-agent commands use Fedora's unconfined domain.
         write_files:
         - path: /usr/local/libexec/tft-guest-exec
@@ -107,7 +119,14 @@ spec:
           content: |
             #!/bin/sh
             exec "$@"
+{% if vm_simple_script %}
+        - path: /usr/local/bin/simple-tcp-server-client
+          permissions: "0755"
+          content: |
+{{ vm_simple_script | indent(12, first=True) }}
+{% endif %}
         runcmd:
+        - [sh, -c, "systemctl disable --now firewalld || true"]
         - [setsebool, -P, virt_qemu_ga_run_unconfined, "on"]
         - [chcon, -t, virt_qemu_ga_unconfined_exec_t, /usr/local/libexec/tft-guest-exec]
         # TFT controls the guest through QEMU's channel without SSH connectivity.

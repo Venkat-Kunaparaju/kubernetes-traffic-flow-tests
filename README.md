@@ -371,16 +371,31 @@ settings, `runtime_class_name`, `sriov`, and `default_network` do not configure
 VM guest security or bindings.
 
 The template fixes the disk image to `quay.io/containerdisks/fedora:latest` and
-configures Fedora cloud-init, DHCP, and QEMU guest-agent execution through the
-virt-launcher Pod. **Install the required traffic tools in the guest** using a
-`vmi.yaml.j2` override in `TFT_MANIFESTS_OVERRIDES`; the supplied template installs
-no packages. Preserve its guest-execution wrapper and prerequisites. Pod image
-variables do not select the VM image. See the template comments for boot setup.
+uses cloud-init to provision tools for the connection's traffic type:
+
+| Traffic type | Guest provisioning |
+| --- | --- |
+| `iperf-tcp`, `iperf-udp` | `iperf3` |
+| `http` | `python3` and `curl-minimal` (provides `curl`) |
+| `netperf-tcp-stream`, `netperf-tcp-rr` | `netperf` (provides `netperf` and `netserver`) |
+| `simple` | `python3` and the checkout's `simple-tcp-server-client` script |
+| `ib-write-bw`, `ib-read-bw`, `ib-send-bw` | `perftest`, `rdma-core`, `libibverbs`, and `librdmacm` |
+
+All guests receive socket/process utilities, `timeout`, `grep`, the QEMU guest
+agent, and SELinux utilities. The template configures DHCP and guest-agent
+execution through the virt-launcher Pod, and disables `firewalld` inside the test
+guest. Readiness waits for cloud-init completion and checks the commands needed
+by the selected traffic type. RDMA provisioning covers guest userspace tools
+and libraries; the guest still needs a usable RDMA device and kernel driver.
+First boot requires access to Fedora package repositories; allow enough time
+with `TFT_POD_BRINGUP_TIMEOUT`. Customize guest setup through a `vmi.yaml.j2`
+override in `TFT_MANIFESTS_OVERRIDES`, preserving its guest-execution wrapper.
+Pod image variables do not select the VM image.
 
 Guest address selection requires IPv4. The network or binding must supply DHCP
 replies, or the template override must configure guest addresses explicitly.
-Allow test traffic through the guest firewall and grant the kubeconfig VMI
-management, launcher Pod read/exec, and TFT network permissions.
+Grant the kubeconfig VMI management, launcher Pod read/exec, and TFT network
+permissions.
 
 Pod inspection plugins (`validate_offload`, `ovs_doca_validate_offload`,
 `ping_mgmt_port`) cannot run on VM cases; restrict them to Pod cases using the

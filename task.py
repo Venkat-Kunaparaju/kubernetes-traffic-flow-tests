@@ -585,8 +585,48 @@ class Task(ABC):
             quantity = len(nads) + int(self.uses_primary_udn)
             cpu = conn.cpu_request or conn.cpu_limit or "1"
             vm_cpus = Decimal(cpu[:-1]) / 1000 if cpu.endswith("m") else Decimal(cpu)
+            vm_packages = [
+                "iproute",
+                "psmisc",
+                "coreutils",
+                "grep",
+                "qemu-guest-agent",
+                "policycoreutils",
+            ]
+            vm_commands = ["ss", "killall", "timeout", "grep"]
+            vm_simple_script = ""
+            if conn.test_type in (TestType.IPERF_TCP, TestType.IPERF_UDP):
+                vm_packages.append("iperf3")
+                vm_commands.append("iperf3")
+            elif conn.test_type == TestType.HTTP:
+                vm_packages.extend(["python3", "curl-minimal"])
+                vm_commands.extend(["python3", "curl"])
+            elif conn.test_type in (
+                TestType.NETPERF_TCP_STREAM,
+                TestType.NETPERF_TCP_RR,
+            ):
+                vm_packages.append("netperf")
+                vm_commands.extend(["netperf", "netserver"])
+            elif conn.test_type == TestType.SIMPLE:
+                vm_packages.append("python3")
+                vm_commands.extend(["python3", "simple-tcp-server-client"])
+                with open(
+                    tftbase.tftfile("scripts", "simple-tcp-server-client.py"),
+                    encoding="utf-8",
+                ) as script:
+                    vm_simple_script = script.read()
+            elif conn.test_type in (
+                TestType.IB_WRITE_BW,
+                TestType.IB_READ_BW,
+                TestType.IB_SEND_BW,
+            ):
+                vm_packages.extend(["perftest", "rdma-core", "libibverbs", "librdmacm"])
+                vm_commands.append(conn.test_type.name.lower())
             template_args.update(
                 {
+                    "vm_packages": vm_packages,
+                    "vm_commands": vm_commands,
+                    "vm_simple_script": vm_simple_script,
                     "vm_cpus": str(max(1, math.ceil(vm_cpus))),
                     "vm_primary_interface": primary_interface,
                     "vm_secondary_interface": secondary_interface,
