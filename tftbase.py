@@ -28,6 +28,8 @@ logger = common.ExtendedLogger("tft." + __name__)
 ENV_TFT_TEST_IMAGE = "TFT_TEST_IMAGE"
 ENV_TFT_RDMA_TEST_IMAGE = "TFT_RDMA_TEST_IMAGE"
 ENV_TFT_IMAGE_PULL_POLICY = "TFT_IMAGE_PULL_POLICY"
+ENV_TFT_VM_PRIMARY_INTERFACE = "TFT_VM_PRIMARY_INTERFACE"
+ENV_TFT_VM_SECONDARY_INTERFACE = "TFT_VM_SECONDARY_INTERFACE"
 
 ENV_TFT_PRIVILEGED_POD = "TFT_PRIVILEGED_POD"
 
@@ -195,6 +197,23 @@ def get_tft_image_pull_policy() -> str:
             s = "IfNotPresent"
     logger.info(f"env: {ENV_TFT_IMAGE_PULL_POLICY}={shlex.quote(s)}")
     return s
+
+
+@functools.cache
+def get_tft_vm_interface(*, primary: bool) -> str:
+    variable = (
+        ENV_TFT_VM_PRIMARY_INTERFACE if primary else ENV_TFT_VM_SECONDARY_INTERFACE
+    )
+    value = get_environ(variable) or "bridge"
+    if value not in ("bridge", "sriov") and not (
+        value.startswith("binding:")
+        and value.removeprefix("binding:")
+        and not any(c.isspace() for c in value)
+        and value.count(":") == 1
+    ):
+        raise ValueError(f"{variable} must be bridge, sriov, or binding:<name>")
+    logger.info(f"env: {variable}={shlex.quote(value)}")
+    return value
 
 
 @functools.cache
@@ -765,6 +784,15 @@ class TestCaseType(Enum):
     HOST_TO_NODE_PORT_SERVER_TO_HOST_DIFF_NODE = 99
     UDN_PRIMARY_POD_TO_NODE_PORT_SERVER_TO_POD_SAME_NODE = 100
     UDN_PRIMARY_POD_TO_NODE_PORT_SERVER_TO_POD_DIFF_NODE = 101
+    UDN_PRIMARY_VM_TO_VM_SAME_NODE = 102
+    UDN_PRIMARY_VM_TO_VM_DIFF_NODE = 103
+
+    @property
+    def is_vm(self) -> bool:
+        return self in (
+            TestCaseType.UDN_PRIMARY_VM_TO_VM_SAME_NODE,
+            TestCaseType.UDN_PRIMARY_VM_TO_VM_DIFF_NODE,
+        )
 
     @property
     def is_egress_ip(self) -> bool:
@@ -2034,6 +2062,20 @@ _test_case_typ_infos = {
         TestCaseTypInfo(
             test_case_type=TestCaseType.UDN_PRIMARY_POD_TO_NODE_PORT_SERVER_TO_POD_DIFF_NODE,
             connection_mode=ConnectionMode.NODE_PORT_SERVER_IP,
+            is_same_node=False,
+            is_server_hostbacked=False,
+            is_client_hostbacked=False,
+        ),
+        TestCaseTypInfo(
+            test_case_type=TestCaseType.UDN_PRIMARY_VM_TO_VM_SAME_NODE,
+            connection_mode=ConnectionMode.POD_IP,
+            is_same_node=True,
+            is_server_hostbacked=False,
+            is_client_hostbacked=False,
+        ),
+        TestCaseTypInfo(
+            test_case_type=TestCaseType.UDN_PRIMARY_VM_TO_VM_DIFF_NODE,
+            connection_mode=ConnectionMode.POD_IP,
             is_same_node=False,
             is_server_hostbacked=False,
             is_client_hostbacked=False,
