@@ -34,11 +34,12 @@ For a concrete offline example, use an existing historical fixture:
 Test ID: (1) POD_TO_POD_SAME_NODE, Test Type: IPERF_TCP, Reverse: false, TX Bitrate: 38.848 Gbps, RX Bitrate: 38.691 Gbps, succeeded
 Test ID: (1) POD_TO_POD_SAME_NODE, Test Type: IPERF_TCP, Reverse: true, TX Bitrate: 42.193 Gbps, RX Bitrate: 42.364 Gbps, succeeded
 ```
+
 This excerpt shows the first two passing entries produced from the fixture by
 the current tools. The complete fixture also contains an intentional ANP-deny
 failure: the printer returns `1` for that full file, demonstrating the failure
-path. `Test ID` is the numeric ID and enum name; `Reverse` identifies direction. `Target Access` is printed
-only when it differs from the current default for that case. The JSON metadata records
+path. `Test ID` is the numeric ID and enum name; `Reverse` identifies direction.
+`Target Access` is printed only when it differs from the current default for that case. The JSON metadata records
 the actual access mode, except default `IP` is omitted.
 
 ## Tool metrics

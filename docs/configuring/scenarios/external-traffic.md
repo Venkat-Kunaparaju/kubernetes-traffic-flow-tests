@@ -10,10 +10,12 @@ Use this page when you need pod or host egress to an endpoint outside Kubernetes
 ## Cluster prerequisites
 
 OVN-Kubernetes is not required for cases 25–26. The default path starts an external
-server with Podman on the TFT runner and publishes a dynamically assigned host port.
+server with Podman on a Linux TFT runner and publishes a dynamically assigned host port.
 Routing and firewalls must let cluster clients reach that runner address and port. TFT
-does not install Podman or create firewall rules. Skip the Podman prerequisite when
-using an explicitly configured external server.
+does not install Podman or create firewall rules. The default path also uses
+Linux `getent`, `ip -j route get`, and `ss` on the runner to select its address
+and check the listener. Skip these runner-side server prerequisites when using
+an explicitly configured external server.
 
 For a pre-existing iperf3 server, set `TFT_EXTERNAL_SERVER=192.0.2.10:5201` before
 running. Replace this documentation address with a reachable host. The server must match
