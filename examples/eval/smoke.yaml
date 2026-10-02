@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+# Illustrative 1 Gbit/s smoke thresholds; calibrate for your cluster.
+# No site placeholders, but adjust thresholds before enforcing them in CI.
+
+IPERF_TCP:
+- id: 1
+  Normal:
+    threshold: 1
+  Reverse:
+    threshold: 1
+- id: 2
+  Normal:
+    threshold: 1
+  Reverse:
+    threshold: 1
+- id: 5
+  Normal:
+    threshold: 1
+  Reverse:
+    threshold: 1
+- id: 6
+  Normal:
+    threshold: 1
+  Reverse:
+    threshold: 1

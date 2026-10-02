@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+# Secondary networks and SR-IOV. Requires Multus and a pre-existing NAD on both endpoints.
+# Replace worker-1/worker-2 and any site-specific values before running.
+
+tft:
+- name: Secondary networks and SR-IOV
+  namespace: tft-docs
+  test_cases: 27,28
+  duration: 10
+  connections:
+  - name: traffic
+    type: iperf-tcp
+    instances: 1
+    reverse: false
+    server:
+    - name: worker-1
+      secondary_network_nad: default/secondary
+    client:
+    - name: worker-2
+      secondary_network_nad: default/secondary

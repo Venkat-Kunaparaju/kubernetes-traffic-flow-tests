@@ -3,897 +3,164 @@ SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Traffic Flow Test Scripts
 
-This repository contains the yaml files, docker files, and test scripts to test Traffic Flows in an OVN-Kubernetes k8s cluster.
+# Kubernetes traffic flow tests
 
-## Setting up the environment
+Traffic Flow Tests (TFT) checks Kubernetes connectivity, throughput, offload, and
+network-policy behavior. You choose traffic paths and tools in YAML; TFT creates test
+pods and, when needed, Services, policies, NADs, UDN/CUDN networks, and namespaces. It
+records measurements and optional plugin checks, evaluates results, and normally cleans
+up the resources it owns. Use a dedicated test namespace: TFT also changes security
+labels on reused namespaces.
 
-The package "kubectl" should be installed.
+## Prerequisites
 
-The recommended python version is 3.11 for running the Traffic Flow tests
+### CNI and feature support
 
-```
-python -m venv tft-venv
-source tft-venv/bin/activate
-pip3 install --upgrade pip
-pip3 install -r requirements.txt
-```
+Default-network pod/host, ClusterIP, NodePort, LoadBalancer, external, and ordinary
+NetworkPolicy cases use standard Kubernetes resources. They can be used with another CNI
+when that CNI implements the selected behavior; the presence of an API does not
+establish data-path enforcement. This repository focuses on OVN-Kubernetes, and a
+source-based description of a path is not a claim that every CNI or hardware combination
+has been validated.
 
-### Optional: Developer Environment Setup
+OVN-Kubernetes features are required for primary and secondary UDN/CUDN cases **37–47,
+70–91, 100–101**, EgressIP **68**, the `ping_mgmt_port` plugin, and this repository's
+OVN offload/DPU workflows (`validate_offload`, `ovs_doca_validate_offload`).
+AdminNetworkPolicy **32–34** requires its CRD and CNI enforcement; it targets the OVN-K
+workflow here, but the standard API can also be implemented by other CNIs.
 
-If you're planning to contribute or run tests/linters locally, install the developer dependencies to the environment. These include everything from `requirements.txt` (runtime) plus additional tools like `pytest`, `black`, `mypy`, and `flake8`:
+`measure_cpu` and `measure_power` do not depend on OVN APIs in single-cluster mode.
+Secondary-network/MultiNetworkPolicy cases **27–31** need Multus, usable NADs, and MNP
+support for policy checks. Their automatically generated NAD uses OVN-Kubernetes; use
+pre-existing endpoint NADs for another secondary CNI.
 
-```bash
-python -m venv tft-venv 
-source tft-venv/bin/activate
-pip3 install --upgrade pip
-pip3 install -r requirements-devel.txt
-```
+### Cluster, access, and tools
 
-Once installed, you can use:
-```bash
-pytest         # Run test suite
-black .        # Format code
-...
-```
+- Use at least two Ready worker nodes for different-node cases. Same-node cases
+  can run on a single worker; examples include **1, 3, 5, 7, 9, 11, 13, 15**.
+  The [catalog](docs/configuring/test-cases.md) lists placement for every case.
+- The runner needs `kubectl`, a recommended Python **3.11** environment, and
+  a kubeconfig supplied through TFT's CLI, environment, or YAML. TFT does not
+  automatically use the usual `~/.kube/config` / `KUBECONFIG` defaults.
+- Grant read access to nodes and selected RuntimeClasses, create/update/delete
+  access to namespaces, pods (including exec), Services, and the feature
+  resources in the suite. Network cases can need NADs, policies, UDN/CUDN,
+  RouteAdvertisements, Uplink/FRR reads, EgressIP, and node labelling. Plugin
+  pods require privileged/host-network/host-filesystem access. In practice,
+  running all features usually requires cluster-admin-equivalent access;
+  a narrower role must match the selected suite's actual operations.
+- Cluster nodes need access to the test container image, or set `TFT_TEST_IMAGE`
+  to a mirrored image and arrange cluster image-pull credentials. See
+  [installation](docs/getting-started/install.md) for image and pull-policy rules.
 
-This step is **optional** and not required for using the Traffic Flow Test scripts.
+| Feature | Prepare before running TFT | Guide |
+| --- | --- | --- |
+| Ordinary Services | Working ClusterIP/NodePort routing and DNS for name variants | [Services](docs/configuring/scenarios/services.md) |
+| LoadBalancer | Provider/address allocation, such as MetalLB, and reachable external IPs | [Services](docs/configuring/scenarios/services.md) |
+| Secondary networks | Multus and an appropriate NAD/CNI; generated NAD path is OVN-specific | [Secondary networks](docs/configuring/scenarios/secondary-networks-sriov.md) |
+| SR-IOV | SR-IOV operator or equivalent VF/device-plugin setup, NAD and extended resource | [SR-IOV](docs/configuring/scenarios/secondary-networks-sriov.md) |
+| NP / MNP | Enforcing CNI; MNP also needs its CRD and network attachment | [Network policy](docs/configuring/scenarios/network-policy.md) |
+| ANP | AdminNetworkPolicy CRD and CNI enforcement | [AdminNetworkPolicy](docs/configuring/scenarios/admin-network-policy.md) |
+| UDN / CUDN | OVN-Kubernetes feature/CRDs; localnet needs physical-network mapping | [UDN/CUDN](docs/configuring/scenarios/udn-cudn.md) |
+| No-overlay route advertisement | Supported OVN transport, underlay routes, appropriate FRR setup; existing Uplink when referenced | [UDN/CUDN routing](docs/configuring/scenarios/udn-cudn.md#no-overlay-primary-cudn) |
+| EgressIP | OVN EgressIP support and an assignable site address | [EgressIP](docs/configuring/scenarios/egress-ip.md) |
+| DPU offload | Site DPU/operator deployment, paired infra kubeconfig/labels, VF and representor access | [DPU mode](docs/configuring/scenarios/dpu-mode.md) |
+| RDMA | RDMA NICs/devices exposed to pods, usable fabric/transport, RDMA image | [RDMA](docs/configuring/scenarios/rdma.md) |
+| RuntimeClass | Installed runtime such as Kata, RuntimeClass object, compatible selected nodes | [RuntimeClass](docs/configuring/scenarios/runtime-class.md) |
+| External traffic | Reachable Linux runner with Podman, or a pre-existing matching tool server/HTTP URL | [External traffic](docs/configuring/scenarios/external-traffic.md) |
+| Power sampling | Working node IPMI/DCMI sensors and privileged plugin pods | [Plugins](docs/configuring/plugins.md) |
 
-## Configuration YAML fields:
+On OpenShift, set `TFT_HOST_NETWORK_NAMESPACE=openshift-host-network` for case 69.
+Security admission must permit the traffic and plugin pod types you select; see the
+scenario prerequisites and [environment
+reference](docs/configuring/environment-variables.md).
 
-```
-tft:
-  - name: "(1)"
-    namespace: "(2)"
-    runtime_class_name: "(2a)"
-    # test cases can be specified individually i.e "1,2,POD_TO_HOST_SAME_NODE,6" or as a range i.e. "POD_TO_POD_SAME_NODE-9,15-19"
-    test_cases: "(3)"
-    duration: "(4)"
-    pre_provision: (5)
-    # Location of artifacts from run can be specified: default <working-dir>/ft-logs/
-    # logs: "/tmp/ft-logs"
-    connections:
-      - name: "(6)"
-        type: "(7)"
-        test_cases: "(7a)"
-        instances: (8)
-        reverse: "(9)"
-        duration: "(10)"
-        server:
-          - name: "(11)"
-            persistent: "(12)"
-            sriov: "(13)"
-            default_network: "(14)"
-            secondary_network_nad: "(15)"
-            runtime_class_name: "(15a)"
-        client:
-          - name: "(16)"
-            sriov: "(17)"
-            default_network: "(18)"
-            secondary_network_nad: "(19)"
-            runtime_class_name: "(19a)"
-        plugins:
-          - name: (20)
-            test_cases: (21)
-          - name: (20)
-        secondary_network_nad: "(22)"
-        resource_name: "(23)"
-        cpu_request: "(24)"
-        cpu_limit: "(25)"
-        mem_request: "(26)"
-        mem_limit: "(27)"
-        egress_ip:
-          ip: "(28)"
-          node: "(29)"
-    privileged_pod: (30)
-    capabilities_pod: (31)
-    udn_primary_network: # (32)
-      name: "(33)"
-      mode: "(34)"
-      topology: "(35)"
-      transport: "(36)"
-      uplink_name: "(37)"
-      route_advertisement: # (38)
-        targetVRF: "(39)"
-        frr_configuration_selector: # (40)
-          "(41)": "(42)"
-kubeconfig: (43)
-kubeconfig_infra: (43)
-dpu_node_host_label: (44)
-```
+## Quick start
 
-1. "name" - This is the name of the test. Any string value to identify the test.
-2. "namespace" - The k8s namespace where the test pods will be run on
-
-2a. "runtime_class_name": (Optional) The Kubernetes RuntimeClass to use for eligible traffic
-  pods in this test, for example `kata`. Per-node `runtime_class_name` on `server` / `client`
-  overrides this value. If neither is set, those pods use the cluster default runtime.
-3. "test_cases" - A list of the tests that can be run. This can be either a string
-     that possibly contains ranges (comma separated, ranged separated by '-'), or a
-     YAML list. Every connection runs these cases in addition to any cases listed
-     under that connection.
-     If omitted, null, or an empty string, it defaults to all test cases.
-    | ID | Test Name            |
-    | -- | -------------------- |
-    | 1  | POD_TO_POD_SAME_NODE |
-    | 2  | POD_TO_POD_DIFF_NODE |
-    | 3  | POD_TO_HOST_SAME_NODE |
-    | 4  | POD_TO_HOST_DIFF_NODE |
-    | 5  | POD_TO_CLUSTER_IP_TO_POD_SAME_NODE |
-    | 6  | POD_TO_CLUSTER_IP_TO_POD_DIFF_NODE |
-    | 7  | POD_TO_CLUSTER_IP_TO_HOST_SAME_NODE |
-    | 8  | POD_TO_CLUSTER_IP_TO_HOST_DIFF_NODE |
-    | 9  | POD_TO_NODE_PORT_TO_POD_SAME_NODE |
-    | 10 | POD_TO_NODE_PORT_TO_POD_DIFF_NODE |
-    | 11 | POD_TO_NODE_PORT_TO_HOST_SAME_NODE |
-    | 12 | POD_TO_NODE_PORT_TO_HOST_DIFF_NODE |
-    | 13 | HOST_TO_HOST_SAME_NODE |
-    | 14 | HOST_TO_HOST_DIFF_NODE |
-    | 15 | HOST_TO_POD_SAME_NODE |
-    | 16 | HOST_TO_POD_DIFF_NODE |
-    | 17 | HOST_TO_CLUSTER_IP_TO_POD_SAME_NODE |
-    | 18 | HOST_TO_CLUSTER_IP_TO_POD_DIFF_NODE |
-    | 19 | HOST_TO_CLUSTER_IP_TO_HOST_SAME_NODE |
-    | 20 | HOST_TO_CLUSTER_IP_TO_HOST_DIFF_NODE |
-    | 21 | HOST_TO_NODE_PORT_TO_POD_SAME_NODE |
-    | 22 | HOST_TO_NODE_PORT_TO_POD_DIFF_NODE |
-    | 23 | HOST_TO_NODE_PORT_TO_HOST_SAME_NODE |
-    | 24 | HOST_TO_NODE_PORT_TO_HOST_DIFF_NODE |
-    | 25 | POD_TO_EXTERNAL |
-    | 26 | HOST_TO_EXTERNAL |
-    | 27 | POD_TO_POD_2ND_INTERFACE_SAME_NODE |
-    | 28 | POD_TO_POD_2ND_INTERFACE_DIFF_NODE |
-    | 29 | POD_TO_POD_2ND_INTERFACE_MNP_ALLOW_2ND |
-    | 30 | POD_TO_POD_2ND_INTERFACE_MNP_DENY_2ND |
-    | 31 | POD_TO_POD_PRIMARY_INTERFACE_MNP_DENY_2ND |
-    | 32 | POD_TO_POD_ANP_ALLOW |
-    | 33 | POD_TO_POD_ANP_DENY |
-    | 34 | POD_TO_POD_ANP_PASS_NP_DENY |
-    | 35 | POD_TO_POD_NP_DENY |
-    | 36 | POD_TO_POD_NP_ALLOW |
-    | 37 | UDN_PRIMARY_POD_TO_POD_SAME_NODE |
-    | 38 | UDN_PRIMARY_POD_TO_POD_DIFF_NODE |
-    | 39 | UDN_PRIMARY_POD_TO_CLUSTER_IP_TO_POD_SAME_NODE |
-    | 40 | UDN_PRIMARY_POD_TO_CLUSTER_IP_TO_POD_DIFF_NODE |
-    | 41 | UDN_PRIMARY_POD_TO_NODE_PORT_TO_POD_SAME_NODE |
-    | 42 | UDN_PRIMARY_POD_TO_NODE_PORT_TO_POD_DIFF_NODE |
-    | 43 | UDN_PRIMARY_POD_TO_EXTERNAL |
-    | 44 | UDN_PRIMARY_POD_TO_POD_NP_DENY |
-    | 45 | UDN_PRIMARY_POD_TO_POD_NP_ALLOW |
-    | 46 | UDN_PRIMARY_POD_TO_LOAD_BALANCER_TO_POD_SAME_NODE |
-    | 47 | UDN_PRIMARY_POD_TO_LOAD_BALANCER_TO_POD_DIFF_NODE |
-    | 60 | POD_TO_LOAD_BALANCER_TO_POD_SAME_NODE |
-    | 61 | POD_TO_LOAD_BALANCER_TO_POD_DIFF_NODE |
-    | 62 | POD_TO_LOAD_BALANCER_TO_HOST_SAME_NODE |
-    | 63 | POD_TO_LOAD_BALANCER_TO_HOST_DIFF_NODE |
-    | 64 | HOST_TO_LOAD_BALANCER_TO_POD_SAME_NODE |
-    | 65 | HOST_TO_LOAD_BALANCER_TO_POD_DIFF_NODE |
-    | 66 | HOST_TO_LOAD_BALANCER_TO_HOST_SAME_NODE |
-    | 67 | HOST_TO_LOAD_BALANCER_TO_HOST_DIFF_NODE |
-    | 68 | POD_TO_EXTERNAL_EGRESS |
-    | 69 | HOST_TO_POD_NP_NS_SELECTOR_ALLOW |
-    | 70 | CUDN_LAYER3_POD_TO_POD_SAME_NODE |
-    | 71 | CUDN_LAYER3_POD_TO_POD_DIFF_NODE |
-    | 72 | UDN_LAYER3_POD_TO_POD_SAME_NODE |
-    | 73 | UDN_LAYER3_POD_TO_POD_DIFF_NODE |
-    | 74 | CUDN_LAYER2_POD_TO_POD_SAME_NODE |
-    | 75 | CUDN_LAYER2_POD_TO_POD_DIFF_NODE |
-    | 76 | UDN_LAYER2_POD_TO_POD_SAME_NODE |
-    | 77 | UDN_LAYER2_POD_TO_POD_DIFF_NODE |
-    | 78 | CUDN_LOCALNET_POD_TO_POD_SAME_NODE |
-    | 79 | CUDN_LOCALNET_POD_TO_POD_DIFF_NODE |
-    | 80 | UDN_PRIMARY_POD_TO_CDN_POD_SAME_NODE |
-    | 81 | UDN_PRIMARY_POD_TO_CDN_POD_DIFF_NODE |
-    | 82 | CUDN_LAYER3_POD_TO_POD_MNP_DENY |
-    | 83 | CUDN_LAYER3_POD_TO_POD_MNP_ALLOW |
-    | 84 | UDN_LAYER3_POD_TO_POD_MNP_DENY |
-    | 85 | UDN_LAYER3_POD_TO_POD_MNP_ALLOW |
-    | 86 | CUDN_LAYER2_POD_TO_POD_MNP_DENY |
-    | 87 | CUDN_LAYER2_POD_TO_POD_MNP_ALLOW |
-    | 88 | UDN_LAYER2_POD_TO_POD_MNP_DENY |
-    | 89 | UDN_LAYER2_POD_TO_POD_MNP_ALLOW |
-    | 90 | CUDN_LOCALNET_POD_TO_POD_MNP_DENY |
-    | 91 | CUDN_LOCALNET_POD_TO_POD_MNP_ALLOW |
-    | 92 | POD_TO_NODE_PORT_SERVER_TO_POD_SAME_NODE |
-    | 93 | POD_TO_NODE_PORT_SERVER_TO_POD_DIFF_NODE |
-    | 94 | POD_TO_NODE_PORT_SERVER_TO_HOST_SAME_NODE |
-    | 95 | POD_TO_NODE_PORT_SERVER_TO_HOST_DIFF_NODE |
-    | 96 | HOST_TO_NODE_PORT_SERVER_TO_POD_SAME_NODE |
-    | 97 | HOST_TO_NODE_PORT_SERVER_TO_POD_DIFF_NODE |
-    | 98 | HOST_TO_NODE_PORT_SERVER_TO_HOST_SAME_NODE |
-    | 99 | HOST_TO_NODE_PORT_SERVER_TO_HOST_DIFF_NODE |
-    | 100 | UDN_PRIMARY_POD_TO_NODE_PORT_SERVER_TO_POD_SAME_NODE |
-    | 101 | UDN_PRIMARY_POD_TO_NODE_PORT_SERVER_TO_POD_DIFF_NODE |
-
-    NodePort test names containing `NODE_PORT_TO` without a node qualifier
-    (cases 9-12, 21-24, and 41-42) use the configured client node's InternalIP
-    and the allocated NodePort by default. Names containing `NODE_PORT_SERVER_TO`
-    (cases 92-101) use the server node's InternalIP and the allocated NodePort
-    by default. `SAME_NODE` and `DIFF_NODE` describe the placement of the client
-    and server endpoints. `TFT_DEFAULT_TARGET_ACCESS_MODE` does not affect
-    NodePort tests.
-
-4. "duration" - The duration that each individual test will run for.
-5. "pre_provision" - (Optional) Whether to pre-provision all pods and services once before the test run begins, rather than creating and tearing them down per test case. Defaults to false. Takes in "true/false".
-6. "name" - This is the connection name. Any string value to identify the connection.
-7. "type" - Supported types of connections are iperf-tcp, iperf-udp, http, netperf-tcp-stream, netperf-tcp-rr, ib-write-bw, ib-read-bw, ib-send-bw
-7a. "test_cases" - (Optional) Additional test cases to run for this connection,
-  using the same format as the TFT-level `test_cases`. The connection runs the
-  TFT-level cases plus its own cases, with duplicates removed. If omitted, null,
-  or `[]`, no additional cases are selected. Use `"*"` or an empty string to
-  select all cases for this connection.
-8. "instances" - The number of instances that would be created. Default is "1"
-9. "reverse" - (Optional) Whether reverse-direction test should run when supported. Defaults to true. Currently, reverse execution is only supported for iperf-tcp. Takes in "true/false".
-10. "duration" - (Optional) Override the test duration for this connection only, in seconds. If omitted, the tft-level duration is used.
-11. "name" - The node name of the server.
-12. "persistent" - Whether to have the server pod persist after the test. Takes in "true/false"
-13. "sriov" - Whether SRIOV should be used for the server pod. Takes in "true/false"
-14. "default_network" - (Optional) The name of the default network that the sriov pod would use.
-14a. "pod_port" - (Optional) The base port for pod-type servers. Defaults to 5201. When multiple connections are configured, each connection should use a unique port to avoid service conflicts.
-14b. "host_port" - (Optional) The base port for host-backed servers. Defaults to 5301. When multiple connections are configured, each connection should use a unique port to avoid service conflicts.
-15. "secondary_network_nad" - (Optional) The secondary network NAD for the server node. Overrides the connection-level `secondary_network_nad` for the server pod. Useful when server and client require different NADs.
-15a. "runtime_class_name" - (Optional) RuntimeClass for eligible traffic pods on this server node. Overrides the test-level `runtime_class_name`. Host-network pods on this node still use the cluster default runtime.
-16. "name" - The node name of the client.
-17. "sriov" - Whether SRIOV should be used for the client pod. Takes in "true/false"
-18. "default_network" - (Optional) The name of the default network that the sriov pod would use.
-18a. "args" - (Optional) Extra command-line arguments to pass to the test tool (iperf3, simple-tcp-server-client). Supported for iperf-tcp, iperf-udp, and simple test types. Can be a string or list of strings.
-19. "secondary_network_nad" - (Optional) The secondary network NAD for the client node. Overrides the connection-level `secondary_network_nad` for the client pod. Useful when server and client require different NADs.
-19a. "runtime_class_name" - (Optional) RuntimeClass for eligible traffic pods on this client node. Overrides the test-level `runtime_class_name`. Host-network pods on this node still use the cluster default runtime.
-20. "name" - (Optional) list of plugin names
-    | Name                       | Description                      |
-    | -------------------------- | -------------------------------- |
-    | measure_cpu                | Measure CPU Usage                |
-    | measure_power              | Measure Power Usage              |
-    | validate_offload           | Verify OvS Offload               |
-    | ovs_doca_validate_offload  | Verify OVS-DOCA Offload          |
-21. "test_cases" - (Optional) Restrict a plugin to run only for the specified test cases. Uses the same format as the top-level `test_cases` field. By default, the plugin runs for every test case.
-22. "secondary_network_nad" - (Optional) - The name of the secondary network for multi-homing and multi-networkpolicies tests. For mandatory tests 27-31 it defaults to "tft-secondary" if not set and can be overridden per-node using the server/client level `secondary_network_nad` fields. Tests 70-79 and 82-91 instead use the generated NAD selected by each test case and do not use this option. The framework automatically creates and cleans up the regular secondary NAD when required. Subnets, MTU, and topology default to `10.193.0.0/16/26`, `1500`, and `layer3`, overridable via `TFT_SECONDARY_NAD_SUBNETS`, `TFT_SECONDARY_NAD_MTU`, and `TFT_SECONDARY_NAD_TOPOLOGY`.
-23. "resource_name" - (Optional) - The resource name for tests that require resource limit and requests to be set. This field is optional and will default to None if not set, but if secondary network nad is defined, traffic flow test tool will try to autopopulate resource_name based on the secondary+network_nad provided.
-24. "cpu_request" - (Optional) CPU request for server and client pods (e.g. "10m", "500m"). No CPU request is set if omitted.
-25. "cpu_limit" - (Optional) CPU limit for server and client pods (e.g. "20m", "1000m"). No CPU limit is set if omitted.
-26. "mem_request" - (Optional) Memory request for server and client pods (e.g. "50Mi", "100Mi"). No memory request is set if omitted.
-27. "mem_limit" - (Optional) Memory limit for server and client pods (e.g. "100Mi", "200Mi"). No memory limit is set if omitted.
-28. "egress_ip" - (Optional) Configures the connection to use an OVN-Kubernetes EgressIP. Only
-  applicable to the `POD_TO_EXTERNAL_EGRESS` (68) test case. See
-  [EgressIP Tests](#egressip-tests) below.
-    - "ip" - The EgressIP address to assign. Must fall within the egress node's
-      `k8s.ovn.org/host-cidrs` subnets.
-29. "node" - (Optional) The node to label as `k8s.ovn.org/egress-assignable` and to assign the
-      EgressIP to. Defaults to the connection's client node if unset.
-30. "privileged_pod" - (Optional) - Whether to run test pods as privileged. Defaults to false. Can be set at test level or per-node (server/client).
-31. "capabilities_pod" - (Optional) - Linux capabilities for test pods. Format: `{"add": ["NET_ADMIN", "SYS_TIME"]}`. Can be set at test level (applies to all pods) or per-node (server/client) for fine-grained control. Per-node settings take precedence over test-level settings.
-32. "udn_primary_network" - (Optional) Test-level network configuration for primary UDN test cases. Defaults to `mode: udn`, `topology: layer3`, and `transport: overlay`.
-33. "name" - (Optional) Name of the primary UDN or CUDN. Defaults to `tft-primary`. TFT passes the name through to the generated UDN or CUDN and RouteAdvertisements resources; the user is responsible for choosing a value accepted by Kubernetes and OVN-Kubernetes.
-34. "mode" - (Optional) Field under `udn_primary_network`. Supported values are `udn` and `cudn`.
-35. "topology" - (Optional) Field under `udn_primary_network`. Supported values are `layer3` and `layer2`.
-36. "transport" - (Optional) Field under `udn_primary_network`. Supported values are `overlay` and `no-overlay`; `no-overlay` requires `mode: cudn` and `topology: layer3`.
-37. "uplink_name" - (Optional) Name of a pre-existing cluster-scoped `Uplink` for a primary CUDN. TFT references it in `CUDN.spec.uplinks` but does not create, modify, or delete it.
-38. "route_advertisement" - (Optional) RouteAdvertisements configuration for an unmanaged no-overlay primary CUDN. When specified, `frr_configuration_selector` is required and must not be empty.
-39. "targetVRF" - (Optional) Value copied to `RouteAdvertisements.spec.targetVRF`. TFT accepts any non-empty value, but it must be `auto`, `default`, or the name of a VRF configured on a router in the selected `FRRConfiguration`. If omitted, TFT omits the field and preserves the API's existing behavior.
-40. "frr_configuration_selector" - Required under `route_advertisement`. Map copied to `RouteAdvertisements.spec.frrConfigurationSelector.matchLabels` to select the base `FRRConfiguration`.
-41. selector label key - A Kubernetes label key under `frr_configuration_selector`.
-42. selector label value - A Kubernetes label value under `frr_configuration_selector`. Empty string values are supported.
-43. "kubeconfig", "kubeconfig_infra": if set to non-empty strings, then these are the KUBECONFIG
-  files. "kubeconfig_infra" must be set for DPU cluster mode. If both are empty, the configs
-  are detected based on the files we find at /root/kubeconfig.*.
-44. "dpu_node_host_label": (Required for DPU mode) The label on DPU nodes that identifies
-  which host worker node they belong to. For NVIDIA DPUs, use `provisioning.dpu.nvidia.com/host`.
-
-### Selecting test cases per connection
-
-Put cases that every connection should run in the TFT-level `test_cases`, and
-additional cases for a specific connection under that connection's `test_cases`.
-For example, when an external server serves only one traffic tool, add the
-external-server cases only to that tool's connection.
-
-This configuration runs cases 1-5 for iperf-tcp and only 1-4 for HTTP:
-
-```yaml
-tft:
-  - name: "Mixed traffic tools"
-    namespace: "default"
-    test_cases: "1-4"
-    duration: 30
-    connections:
-      - name: "iperf"
-        type: "iperf-tcp"
-        test_cases: "5"
-        server:
-          - name: "worker-1"
-        client:
-          - name: "worker-2"
-      - name: "http"
-        type: "http"
-        server:
-          - name: "worker-1"
-            pod_port: 5202
-            host_port: 5302
-        client:
-          - name: "worker-2"
-```
-
-Setting HTTP's `test_cases` to `"2,6"` would run cases 1-4 and 6 for HTTP. Case 2
-is already in the TFT-level list, so it runs only once. The iperf connection
-would still run 1-5.
-
-An omitted, null, or empty connection list adds no cases and still runs all
-TFT-level cases. To select cases entirely per connection, set the TFT-level
-`test_cases: []`; omitting the TFT-level field selects all cases by default.
-
-Shared namespace and network setup uses the union of the connections' effective
-test cases. A case is provisioned and executed only for connections that select
-it, including when `pre_provision: true`. Cases that no connection selects do not
-trigger network setup. Existing configurations without connection-level
-`test_cases` continue to use the TFT-level selection for every connection.
-
-### Running traffic pods with a RuntimeClass
-
-Set `runtime_class_name` on a test to run its normal, secondary-network, and SR-IOV traffic
-pods with that RuntimeClass, or set it on an individual `server` / `client` node to override
-the test-level value. For endpoints that run eligible traffic pods with a RuntimeClass, name
-a node that can actually schedule that RuntimeClass; host-network endpoints use the cluster
-default runtime and do not need to match it. TFT does not remap host workers to DPU nodes.
-
-```yaml
-tft:
-  - name: "Kata traffic test"
-    namespace: "default"
-    runtime_class_name: "kata"
-    test_cases: "1"
-    duration: "30"
-    connections:
-      - name: "Connection_1"
-        type: "iperf-tcp"
-        server:
-          - name: "worker-1"
-        client:
-          - name: "worker-2"
-```
-
-On clusters with DPUs, host-network tests use host workers and Kata/coldplug pods must land
-on nodes with the `worker-dpu` role. TFT `server` / `client` `name` values must match a node
-`NAME` on the **tenant** cluster (`kubeconfig`). DPU mode still uses a separate infra
-kubeconfig (`kubeconfig_infra`) for plugins; see [DPU Mode](#dpu-mode).
-
-Example node lists (names vary by deployment; use your tenant `NAME` values in TFT config):
+After [installation](docs/getting-started/install.md), run from the repo root:
 
 ```bash
-# Tenant cluster — traffic pods are scheduled here
-$ oc get nodes
-NAME                 STATUS   ROLES
-host-worker-1        Ready    worker
-host-worker-2        Ready    worker,worker-dpu
-
-# Infra cluster — used by offload plugins, not for TFT server/client names
-$ oc get nodes
-NAME                 STATUS   ROLES
-infra-node-1         Ready    worker
+export TFT_KUBECONFIG="$HOME/.kube/config"
+kubectl --kubeconfig "$TFT_KUBECONFIG" get nodes -o wide
+cp examples/configs/quickstart.yaml quickstart.yaml
+${EDITOR:-vi} quickstart.yaml
+./tft.py --check quickstart.yaml
 ```
+ Replace the example's two worker names in the editor. This runs cases 1 and 2 for ten
+seconds each, without plugins or reverse subtests. Read the result path in the console
+and run `./print_results.py --no-color RESULT.json` on that file. For a single worker
+choose case 1 only. The [full walkthrough](docs/getting-started/quickstart.md) explains
+success and cleanup.
 
-For a mixed host-network server and Kata client, a test-level `runtime_class_name` is enough
-because the host endpoint ignores RuntimeClass and only the client pod uses it:
+## Documentation directory
 
-```yaml
-tft:
-  - test_cases: POD_TO_NODE_PORT_TO_HOST_DIFF_NODE
-    runtime_class_name: kata-coldplug
-    connections:
-      - server:
-          - name: host-worker-1
-        client:
-          - name: host-worker-2
-```
+### Getting started
 
-Use per-node `runtime_class_name` when multiple eligible pod endpoints need different
-RuntimeClass values, or when a test-wide value would apply to every pod endpoint but only one
-node can schedule it (common on minimal clusters with a single Kata-capable DPU):
+| Page | Use it for |
+| --- | --- |
+| [Install TFT](docs/getting-started/install.md) | You need to prepare the machine that runs TFT. |
+| [Run your first test](docs/getting-started/quickstart.md) | You want a short pod-to-pod connectivity and throughput check. |
+| [Run and control tests](docs/getting-started/running-tests.md) | You need command-line options, kubeconfig rules, or cleanup details. |
 
-```yaml
-tft:
-  - runtime_class_name: kata
-    test_cases: POD_TO_POD_DIFF_NODE
-    connections:
-      - server:
-          - name: host-worker-1
-        client:
-          - name: host-worker-2
-            runtime_class_name: kata-coldplug
-```
+### Configuring
 
-If `runtime_class_name` is unset at both levels, the cluster default runtime is used. Before
-creating resources, TFT verifies that every selected RuntimeClass exists on the tenant cluster
-and fails the run early if one is missing.
+| Page | Use it for |
+| --- | --- |
+| [Configuration reference](docs/configuring/config-reference.md) | You need exact fields, defaults, or override rules. |
+| [Environment variables](docs/configuring/environment-variables.md) | You need image, cluster, manifest, network, or logging overrides. |
+| [Add plugins](docs/configuring/plugins.md) | You need CPU, power, offload, or management-port evidence alongside traffic. |
+| [Choose test cases](docs/configuring/test-cases.md) | You need traffic paths, prerequisites, or case-selection syntax. |
+| [Choose a traffic tool](docs/configuring/test-types.md) | You need to decide what to measure and which arguments to use. |
 
-The RuntimeClass applies only to traffic pods rendered from the normal, secondary-network, and
-SR-IOV pod templates. Host-network endpoints, Podman workloads, DPU helper pods, and plugin tool
-pods continue to use the cluster default runtime. The cluster administrator is responsible for
-installing Kata Containers (or another runtime), configuring its handler, and creating the
-corresponding RuntimeClass; TFT does not install or manage runtime implementations.
+### Scenarios
 
-#### RuntimeClass node scheduling
+| Page | Use it for |
+| --- | --- |
+| [AdminNetworkPolicy](docs/configuring/scenarios/admin-network-policy.md) | You need cluster-level Allow, Deny, and Pass checks. |
+| [Basic pod networking](docs/configuring/scenarios/basic-pod-networking.md) | You want to compare pod and host connectivity. |
+| [DPU mode and offload](docs/configuring/scenarios/dpu-mode.md) | You need paired tenant/infra clusters and representor validation on the DPU. |
+| [EgressIP](docs/configuring/scenarios/egress-ip.md) | You need to verify the source address observed by an external server. |
+| [External traffic](docs/configuring/scenarios/external-traffic.md) | You need pod or host egress to an endpoint outside Kubernetes. |
+| [NetworkPolicy and MultiNetworkPolicy](docs/configuring/scenarios/network-policy.md) | You need positive and negative policy checks. |
+| [RDMA traffic](docs/configuring/scenarios/rdma.md) | You need perftest write, read, or send bandwidth measurements. |
+| [Traffic-pod resource limits](docs/configuring/scenarios/resource-limits.md) | You want throughput under explicit CPU or memory budgets. |
+| [RuntimeClass](docs/configuring/scenarios/runtime-class.md) | You want traffic pods to run with Kata or another installed runtime. |
+| [Secondary networks and SR-IOV](docs/configuring/scenarios/secondary-networks-sriov.md) | You need a second interface or a VF-backed default attachment. |
+| [Service traffic](docs/configuring/scenarios/services.md) | You want ClusterIP, NodePort, or LoadBalancer coverage. |
+| [UDN and CUDN traffic](docs/configuring/scenarios/udn-cudn.md) | You need primary-network, secondary-network, or isolation coverage. |
 
-A RuntimeClass can define a `scheduling.nodeSelector` that restricts its pods to nodes where
-the runtime is installed. Kubernetes combines that selector with TFT's per-endpoint
-`kubernetes.io/hostname` selector. Therefore, every node named under `server` or `client` that
-will run normal, secondary-network, or SR-IOV traffic pods with a RuntimeClass must match that
-selector. Host-network endpoints use the cluster default runtime and do not need to satisfy it.
-Otherwise, affected traffic pods remain Pending with a message such as
-`node(s) didn't match Pod's node affinity/selector`.
+### Results
 
-If only one node supports Kata, run same-node test cases and configure both endpoints with that
-node. Different-node test cases require at least two nodes that support the selected
-RuntimeClass:
-
-```yaml
-tft:
-  - runtime_class_name: kata
-    test_cases: POD_TO_POD_SAME_NODE
-    connections:
-      - server:
-          - name: kata-worker
-        client:
-          - name: kata-worker
-```
-
-To troubleshoot scheduling, compare the RuntimeClass selector with the labels on the configured
-nodes:
-
-```bash
-oc get runtimeclass kata -o yaml
-oc get nodes --show-labels
-```
-
-The startup preflight confirms that the RuntimeClass exists, but Kubernetes remains responsible
-for checking whether the selected nodes satisfy its scheduling constraints.
-
-
-## UDN (User Defined Network) Tests
-
-See the [OVN-Kubernetes UDN documentation](https://github.com/ovn-kubernetes/ovn-kubernetes/blob/master/docs/features/user-defined-networks/user-defined-networks.md) for details on User Defined Networks.
-
-Test cases 37-47, 70-91, and 100-101 run traffic over OVN-Kubernetes User Defined Networks. By default, the framework creates and cleans up a `{namespace}-udn` namespace with the appropriate UDN CRDs automatically. NetworkPolicies, MultiNetworkPolicies, and LoadBalancer services for UDN tests are also created in (and torn down from) the `{namespace}-udn` namespace.
-
-- **37-47** (Primary UDN): Network replacing the pod's default network. Its mode, topology, and transport are configured through `udn_primary_network`.
-  - **37-42**: pod-to-pod, ClusterIP, and NodePort.
-  - **43**: pod-to-external (egress out of the UDN to the public internet).
-  - **44-45**: NetworkPolicy enforcement on the primary UDN (deny / allow).
-  - **46-47**: pod-to-LoadBalancer-to-pod (same / different node).
-- **70-79** (Secondary UDN/CUDN): Pod-to-pod tests over a second interface.
-  - **70-71**: Layer3 CUDN.
-  - **72-73**: Layer3 UDN.
-  - **74-75**: Layer2 CUDN.
-  - **76-77**: Layer2 UDN.
-  - **78-79**: Localnet CUDN.
-- **80-81** (Primary UDN isolation): Expected-block tests from a primary UDN pod to a cluster default network pod using direct pod IPs (same / different node).
-- **82-91** (Secondary UDN/CUDN MultiNetworkPolicy): Different-node deny and allow variants on the second interface.
-- **100-101** (Primary UDN): NodePort through the server node IP (same / different node).
-
-In the names of cases 80-81, `CDN` means cluster default network and is distinct from `CUDN`.
-
-The primary CIDR defaults to `15.1.0.0/16` with host subnet `24`. `TFT_UDN_PRIMARY_CIDR` accepts comma-separated entries, for example `15.1.0.0/17/24,15.1.128.0/17/24`. Each entry can include an optional host subnet length as `15.1.0.0/16/24`. Secondary CIDRs default to `15.2.0.0/16` (Layer3 CUDN), `15.3.0.0/16` (Layer3 UDN), `15.4.0.0/16` (Layer2 CUDN), `15.5.0.0/16` (Layer2 UDN), and `15.6.0.0/24` (localnet CUDN). Each CIDR has a corresponding environment variable listed below. The localnet physical network name defaults to `physnet`, overridable via `TFT_CUDN_LOCALNET_PHYSICAL_NETWORK`. Reference manifests are in `manifests/udn.yaml.j2` and `manifests/cudn.yaml.j2`.
-
-Secondary Layer2 and Localnet IPAM modes can be passed through with the corresponding environment variables listed below. TFT does not validate their values. When a variable is unset, TFT omits `ipam` from that UDN/CUDN. TFT includes `subnets` only when the mode is unset or `Enabled`, as required by the OVN-Kubernetes API.
-
-`udn_primary_network` supports `mode` values `udn` and `cudn`, `topology` values `layer3` and `layer2`, and `transport` values `overlay` and `no-overlay`. Its `name` defaults to `tft-primary`. `no-overlay` requires `mode: cudn` and `topology: layer3`.
-
-`TFT_UDN_NO_OVERLAY_ROUTING_MANAGED` selects the CUDN's no-overlay routing mode. When it is true, OVN-Kubernetes manages routing and `route_advertisement` must not be set. When it is false, routing is unmanaged; set `route_advertisement` to have TFT create a RouteAdvertisements object, or omit it when routing is provisioned outside TFT. Its required `frr_configuration_selector` map selects the base FRRConfigurations through `frrConfigurationSelector.matchLabels`. Its optional `targetVRF` is copied directly to `RouteAdvertisements.spec.targetVRF`; omitting it preserves the existing API behavior.
-
-`TFT_EXISTING_PRIMARY_CUDN` applies only to primary CUDN tests and does not affect secondary CUDN tests. Set it to the name of a user-provided primary CUDN instead of having TFT create the primary network. The CUDN must exist before the run and have role `Primary` in its configured Layer2 or Layer3 topology. TFT creates or reuses `{namespace}-udn`, copies the CUDN's `spec.namespaceSelector.matchLabels` onto that namespace, and runs the test workloads there. The CUDN's selector remains unchanged, so its original namespaces stay selected throughout the run and if TFT exits unexpectedly. Only `matchLabels` selectors are supported; selectors with `matchExpressions` are rejected. The user is responsible for ensuring the selector is compatible with the TFT namespace labels. Labels applied to a reused namespace remain after the run. TFT does not create or delete the supplied CUDN or modify its backing Uplink, RouteAdvertisements, and FRRConfiguration. CUDN topology, transport, IPAM, and routing are entirely user-managed in this mode. User-owned CUDNs and RouteAdvertisements must not use the `tft-tests` label, which is reserved for TFT-owned resource cleanup.
-
-```shell
-export TFT_EXISTING_PRIMARY_CUDN=blue
-```
-
-Set `uplink_name` on a primary CUDN to add a pre-existing cluster-scoped `Uplink` to `CUDN.spec.uplinks`. The Uplink must exist before TFT applies the CUDN. TFT does not create, modify, or delete the Uplink.
-
-```yaml
-udn_primary_network:
-  name: blue
-  mode: cudn
-  topology: layer3
-  transport: no-overlay
-  uplink_name: blue-uplink
-  route_advertisement:
-    targetVRF: auto
-    frr_configuration_selector:
-      network: blue
-```
-
-Set `udn_primary_network.name` to customize the generated CUDN name. OVN-Kubernetes uses the CUDN name for its VRF, so `name: blue` creates both `ClusterUserDefinedNetwork/blue` and VRF `blue`. With `targetVRF: auto`, the selected base `FRRConfiguration` must have a matching label such as `network: blue` and a BGP router configured with `vrf: blue`. The selector label only selects the `FRRConfiguration`; it does not set the VRF name. This exact name matching applies to CUDNs; namespaced UDNs use an OVN-Kubernetes-generated VRF name.
-
-## Management Port Reachability Plugin
-
-The `ping_mgmt_port` plugin checks that the client node can reach the `ovn-k8s-mp0`
-management port interface of the server node. The target IP is derived as the `.2`
-address of the server node's `k8s.ovn.org/node-subnets` annotation. Add it to a
-connection's plugin list:
-
-```yaml
-plugins:
-  - ping_mgmt_port
-```
-
-or scoped to specific test cases:
-
-```yaml
-plugins:
-  - name: ping_mgmt_port
-    test_cases: [POD_TO_POD_DIFF_NODE]
-```
-
-## DPU Mode
-
-When running with a DPU (Data Processing Unit) cluster, the offload validation plugins
-query VF representors from the DPU cluster rather than the host. This is because in DPU
-environments, VF representors reside on the DPU where OVS/OVN runs.
-
-### Configuration
-
-To enable DPU mode, configure the following in your `config.yaml`:
-
-```yaml
-kubeconfig: /path/to/tenant-cluster.kubeconfig
-kubeconfig_infra: /path/to/dpu-cluster.kubeconfig
-dpu_node_host_label: "provisioning.dpu.nvidia.com/host"
-```
-
-The `dpu_node_host_label` specifies which label on DPU nodes identifies the corresponding
-host worker node. For example, with NVIDIA DPUs, each DPU node has a label like:
-
-```
-provisioning.dpu.nvidia.com/host: worker-node-name
-```
-
-The plugins use this label to find the correct DPU node for each worker node.
-
-Use `validate_offload` for generic `ethtool -S` statistics. For OVS-DOCA,
-select the derived `ovs_doca_validate_offload` plugin instead:
-
-```yaml
-plugins:
-  - name: ovs_doca_validate_offload
-```
-
-### How It Works
-
-1. **DPU Node Discovery**: The plugin queries DPU nodes by label to find the DPU
-   corresponding to each worker node.
-
-2. **VF Info from Pod**: Gets the VF index and PF index from the pod using standard
-   Linux sysfs interfaces (vendor-agnostic).
-
-3. **VF Representor Lookup**: Uses `devlink port show` on the DPU to find the VF
-   representor by matching `pfnum` and `vfnum` (vendor-agnostic).
-
-4. **Offload Validation**: `validate_offload` runs `ethtool -S` on the VF
-   representor. `ovs_doca_validate_offload` reads the representor's
-   `sw_rx_packets` and `tx_packets` from OVSDB through the host-mounted
-   filesystem.
-
-## Running the tests
-
-Simply run the python application as so:
-
-```
-./tft.py config.yaml
-```
-
-## Example: iperf UDP with custom bandwidth
-
-By default, iperf-udp tests use `-u -b 25G` options. You can customize the bandwidth
-or add other iperf3 options using the `args` parameter on the client and/or server:
-
-```yaml
-tft:
-  - name: "UDP Test with custom bandwidth"
-    namespace: "default"
-    test_cases: "1"
-    duration: "30"
-    connections:
-      - name: "Connection_1"
-        type: "iperf-udp"
-        instances: 1
-        server:
-          - name: "worker-1"
-        client:
-          - name: "worker-2"
-            args: "-b 10G"  # Override the default 25G bandwidth
-```
-
-You can also pass multiple options:
-
-```yaml
-        client:
-          - name: "worker-2"
-            args: "-b 10G --parallel 4"  # Custom bandwidth and 4 parallel streams
-```
-
-Or as a list:
-
-```yaml
-        client:
-          - name: "worker-2"
-            args:
-              - "-b"
-              - "10G"
-              - "--parallel"
-              - "4"
-```
-
-## AdminNetworkPolicy Tests
-
-[AdminNetworkPolicy](https://network-policy-api.sigs.k8s.io/api-overview/#adminnetworkpolicy) (ANP)
-is a cluster-scoped policy that allows cluster administrators to enforce network traffic rules
-before namespace-scoped NetworkPolicies are evaluated. ANP rules can Allow, Deny, or Pass
-traffic. Pass delegates the decision to NetworkPolicies in the namespace.
-
-Three test cases validate ANP behavior, each with the action baked into the test case type:
-
-| ID | Test Case | ANP Action | Expected Result |
-| -- | --------- | ---------- | --------------- |
-| 32 | `POD_TO_POD_ANP_ALLOW` | Allow | Traffic flows |
-| 33 | `POD_TO_POD_ANP_DENY` | Deny | Traffic blocked |
-| 34 | `POD_TO_POD_ANP_PASS_NP_DENY` | Pass (delegates to NP Deny) | Traffic blocked |
-
-Each test creates an AdminNetworkPolicy (priority 50) with ingress and egress rules targeting
-test pods in the namespace. For `POD_TO_POD_ANP_PASS_NP_DENY`, a deny-all NetworkPolicy is
-also created to block traffic after ANP delegates. Tests that expect blocked traffic pass when
-the connection fails, and fail if traffic flows unexpectedly.
+| Page | Use it for |
+| --- | --- |
+| [Generate a baseline](docs/results/baselines.md) | You want thresholds based on successful known-good measurements. |
+| [Evaluate pass and fail](docs/results/evaluation.md) | You need thresholds and reliable CI exit status. |
+| [Output files and current schema](docs/results/output-files.md) | You need artifact paths or fields for a result-processing script. |
+| [Read and compare results](docs/results/reading-results.md) | You have result JSON and need to interpret the measurements. |
 
 ### Examples
 
-Allow and deny tests can run in the same test suite:
+| Directory | Use it for |
+| --- | --- |
+| [examples/](examples/README.md) | Commented scenario configs and sample evaluation YAML. |
 
-```yaml
-tft:
-  - name: "ANP Allow Test"
-    test_cases: POD_TO_POD_ANP_ALLOW
-    connections:
-      - name: "anp-allow"
-        server:
-          - name: "worker-1"
-        client:
-          - name: "worker-2"
+## I want to…
 
-  - name: "ANP Deny Test"
-    test_cases: POD_TO_POD_ANP_DENY
-    connections:
-      - name: "anp-deny"
-        server:
-          - name: "worker-1"
-        client:
-          - name: "worker-2"
+| Task | Start here |
+| --- | --- |
+| Run my first test | [Quickstart](docs/getting-started/quickstart.md) |
+| Choose traffic paths and case IDs | [Test catalog](docs/configuring/test-cases.md) |
+| Change a configuration field | [Configuration reference](docs/configuring/config-reference.md) |
+| Test UDN/CUDN or no-overlay | [UDN/CUDN](docs/configuring/scenarios/udn-cudn.md) |
+| Validate DPU offload | [DPU mode](docs/configuring/scenarios/dpu-mode.md) |
+| Diagnose policy enforcement | [NetworkPolicy/MNP](docs/configuring/scenarios/network-policy.md) |
+| Read a saved result | [Reading results](docs/results/reading-results.md) |
+| Set CI pass/fail thresholds | [Evaluation](docs/results/evaluation.md) |
+| Learn thresholds from known-good runs | [Baselines](docs/results/baselines.md) |
 
-  - name: "ANP Pass with NP Deny"
-    test_cases: POD_TO_POD_ANP_PASS_NP_DENY
-    connections:
-      - name: "anp-pass-np-deny"
-        server:
-          - name: "worker-1"
-        client:
-          - name: "worker-2"
-```
+## Community and contributing
 
-## EgressIP Tests
-
-Test case `POD_TO_EXTERNAL_EGRESS` (68) is like `POD_TO_EXTERNAL`, but the client connection is
-configured to use an OVN-Kubernetes [EgressIP](https://github.com/ovn-kubernetes/ovn-kubernetes/blob/master/docs/features/cluster-egress-controls/egress-ip.md)
-and the source IP seen by the server is verified to match.
-
-Configure it via the `egress_ip` field on a connection:
-
-```yaml
-tft:
-  - name: "EgressIP Test"
-    test_cases: POD_TO_EXTERNAL_EGRESS
-    connections:
-      - name: "egressip-conn"
-        type: "iperf-tcp"
-        egress_ip:
-          ip: "192.168.1.100"
-          node: "worker-1"  # optional, defaults to the connection's client node
-        server:
-          - name: "worker-2"
-        client:
-          - name: "worker-1"
-```
-
-- `ip` - The EgressIP address to assign. It must fall within one of the egress node's
-  `k8s.ovn.org/host-cidrs` subnets, otherwise the test fails before running.
-- `node` - (Optional) The node to label `k8s.ovn.org/egress-assignable=true` and assign the
-  EgressIP to. Defaults to the connection's client node.
-
-Before the test runs, the framework labels the egress node, creates and applies an `EgressIP`
-custom resource (see `manifests/egressip.yaml.j2`) scoped to the test namespace, and polls its
-status for up to 120 seconds until the IP is assigned to a node. After the test runs, the
-server's captured output is parsed for the client's observed source IP (`remote_host` from the
-iperf3 JSON output) and compared against the configured EgressIP; the test fails if they don't
-match. The `EgressIP` resource and the egress node's labels are removed during cleanup.
-
-## Environment variables
-
-- `TFT_TEST_IMAGE` specify the test image. Defaults to `ghcr.io/ovn-kubernetes/kubernetes-traffic-flow-tests:latest`.
-     This is mainly for development and manual testing, to inject another container image.
-     Used for all test types except ib-* tests.
-- `TFT_RDMA_TEST_IMAGE` specify the RDMA test image containing perftest tools (ib_write_bw, etc.).
-     If not set, automatically derived from `TFT_TEST_IMAGE` by adding `-rdma` suffix
-     (e.g., `image:tag` becomes `image-rdma:tag`).
-     Used automatically for ib-* test types.
-- `TFT_IMAGE_PULL_POLICY` the image pull policy. One of `IfNotPresent`, `Always`, `Never`.
-     Defaults to `IfNotPresent`m unless `$TFT_TEST_IMAGE` is set (in which case it defaults
-     to `Always`).
-- `TFT_PRIVILEGED_POD` sets whether test pods are privileged. This overwrites the settings
-     from the configuration YAML.
-- `TFT_MANIFESTS_OVERRIDES` to specify an overrides directory for manifests. If not set, the
-     default is "manifests/overrides". If set to empty, no overrides are used. You can place
-     your own variants of the files from "manifests" directory and they will be preferred.
-- `TFT_MANIFESTS_YAMLS` to specify the output directory for rendered manifests. This
-     defaults to "manifests/yamls".
-- `TFT_KUBECONFIG`, `TFT_KUBECONFIG_INFRA` to overwrite the kubeconfigs from the configuration
-     file. See also the "--kubeconfig" and "--kubeconfig-infra" command line options.
-- `TFT_DEFAULT_TARGET_ACCESS_MODE` controls the normal target access mode for ClusterIP
-     and LoadBalancer tests only. These tests default to `IP` (service IP). Set to `IP`
-     or `SERVICE_NAME` to override their default. This variable does not affect NodePort
-     tests, which default to `CLIENT_NODE_IP` for cases 9-12, 21-24, and 41-42, and
-     `SERVER_NODE_IP` for cases 92-101. Select these cases independently through `test_cases`.
-- `TFT_ENABLE_TARGET_ACCESS_SUBTESTS` enables extra target access variants for service-backed
-     tests. Defaults to `false`; when `true`, ClusterIP and LoadBalancer tests run both
-     `IP` and `SERVICE_NAME`, while NodePort tests also include their respective node IP
-     mode (`CLIENT_NODE_IP` or `SERVER_NODE_IP`).
-- `TFT_EXISTING_PRIMARY_CUDN` names a user-provided CUDN for primary CUDN tests only and does
-     not affect secondary CUDN tests. When set, TFT creates or reuses `{namespace}-udn`,
-     applies the CUDN's namespace selector `matchLabels` to it, and leaves the CUDN unchanged.
-     Selectors with `matchExpressions` are rejected.
-     TFT does not create the primary UDN or CUDN resource.
-- `TFT_UDN_PRIMARY_CIDR` comma-separated CIDR entries for primary UDN tests, e.g. `15.1.0.0/17/24,15.1.128.0/17/24`. Each entry supports an optional host subnet length, e.g. `15.1.0.0/16/24`; entries without one use `24`. Defaults to a single `15.1.0.0/16` entry.
-- `TFT_CUDN_SECONDARY_LAYER3_CIDR` CIDR for secondary Layer3 CUDN tests. Defaults to `15.2.0.0/16`.
-- `TFT_UDN_SECONDARY_LAYER3_CIDR` CIDR for secondary Layer3 UDN tests. Defaults to `15.3.0.0/16`.
-- `TFT_CUDN_SECONDARY_LAYER2_CIDR` CIDR for secondary Layer2 CUDN tests. Defaults to `15.4.0.0/16`.
-- `TFT_UDN_SECONDARY_LAYER2_CIDR` CIDR for secondary Layer2 UDN tests. Defaults to `15.5.0.0/16`.
-- `TFT_CUDN_SECONDARY_LOCALNET_CIDR` CIDR for secondary localnet CUDN tests. Defaults to `15.6.0.0/24`.
-- `TFT_CUDN_SECONDARY_LAYER2_IPAM_MODE` `ipam.mode` for secondary Layer2 CUDN tests. Omitted when unset.
-- `TFT_UDN_SECONDARY_LAYER2_IPAM_MODE` `ipam.mode` for secondary Layer2 UDN tests. Omitted when unset.
-- `TFT_CUDN_SECONDARY_LOCALNET_IPAM_MODE` `ipam.mode` for secondary Localnet CUDN tests. Omitted when unset.
-- `TFT_CUDN_LOCALNET_PHYSICAL_NETWORK` physical network name for localnet CUDN tests. Defaults to `physnet`.
-- `TFT_UDN_NO_OVERLAY_OUTBOUND_SNAT_ENABLED` outbound SNAT setting for no-overlay CUDNs. Defaults to `true`.
-- `TFT_UDN_NO_OVERLAY_ROUTING_MANAGED` whether OVN-Kubernetes manages routing for no-overlay CUDNs. Defaults to `false` (unmanaged).
-- `TFT_EXTERNAL_SERVER` address of a pre-existing external server in `host[:port]` format
-     (e.g. `192.168.1.100:5201`). Works with any test type (iperf, netperf, http).
-     When set and the connection mode is `EXTERNAL_IP` (`POD_TO_EXTERNAL`, `HOST_TO_EXTERNAL`,
-     `UDN_PRIMARY_POD_TO_EXTERNAL`), no local Podman container is
-     started; the client pod connects directly to the specified server. If port is omitted,
-     the configured `pod_port` is used (defaults to `5201`). IPv6 addresses use bracket notation
-     (e.g. `[fd00::1]:5201`). To start an iperf3 server on the remote host:
-     ```bash
-     podman run --rm -p 5201:5201 ghcr.io/ovn-kubernetes/kubernetes-traffic-flow-tests:latest iperf3 -s -p 5201
-     ```
-- `TFT_EXTERNAL_URL` URL to curl for external connectivity tests (e.g. `http://google.com`).
-     Only effective when the connection type is `http` and the connection mode is `POD_TO_EXTERNAL`
-     or `HOST_TO_EXTERNAL`. When set, no Podman server is started; the client pod curls this URL
-     directly. If unset, falls back to the normal Podman-server path.
-- `TFT_EXTERNAL_SERVER_STRING` expected substring in the HTTP response body when
-     `TFT_EXTERNAL_URL` is set. Defaults to `"The document has moved"` (the body of an HTTP 301
-     redirect).
-- `TFT_LOG_PREAMBLE` enable or disable the timestamp and thread preamble that ktoolbox
-     prepends to every log record. Defaults to `true`, which keeps the existing ktoolbox format. 
-     Set to `false` to strip the preamble and log only `LEVEL: message`.
-- `TFT_HOST_NETWORK_NAMESPACE` the namespace used as the `namespaceSelector` target for the
-     `HOST_TO_POD_NP_NS_SELECTOR_ALLOW` test case. Defaults to `ovn-host-network`.
-     For OpenShift clusters, it must be set to `openshift-host-network`.
-- `TFT_POD_BRINGUP_TIMEOUT` controls how long TFT waits for a pod to become ready. Accepts a
-     Kubernetes duration such as `30s` or `5m`. Defaults to `2m`.
-
-## File Transfer via magic-wormhole
-
-It is sometimes cumbersome to transfer files between machines. [magic-wormhole](https://github.com/magic-wormhole/magic-wormhole) helps
-with that. Unfortunately it is not packaged in RHEL/Fedora. You can install it with `pip install magic-wormhole` or
-```
-python3 -m venv /opt/magic-wormhole-venv && \
-( source /opt/magic-wormhole-venv/bin/activate && \
-  pip install --upgrade pip && \
-  pip install magic-wormhole ) && \
-ln -s /opt/magic-wormhole-venv/bin/wormhole /usr/bin/
-```
-
-wormhole is installed in the kubernetes-traffic-flow-tests container.
-From inside the container you can issue `wormhole send $FILE`. Or you can
-
-```
-podman run --rm -ti -v /:/host -v .:/pwd:Z -w /pwd ghcr.io/ovn-kubernetes/kubernetes-traffic-flow-tests:latest wormhole send $FILE
-```
-
-This will print a code, which you use on the receiving end via `wormhole receive $CODE`.
-Or
-
-```
-podman run --rm -ti -v .:/pwd:Z -w /pwd ghcr.io/ovn-kubernetes/kubernetes-traffic-flow-tests:latest wormhole receive $CODE
-```
-
-## Use ktoolbox-netdev
-
-Use ktoolbox' netdev command to collect interface information:
-
-```
-podman run --privileged --network=host ghcr.io/ovn-kubernetes/kubernetes-traffic-flow-tests:latest ktoolbox-netdev
-```
-```
-podman run --privileged --network=host ghcr.io/ovn-kubernetes/kubernetes-traffic-flow-tests:latest sh -c 'ktoolbox-netdev | yq -P -C' | less -R
-```
-
-## Debugging Tests using Simple Exec Script
-
-When a TFT test fails, it cleans up the broken environment. That can make
-debugging cumbersome.
-
-One possible way can be using the "simple" test type with the "--exec"
-parameter. The "simple" test type runs
-[scripts/simple-tcp-server-client.py](scripts/simple-tcp-server-client.py)
-script. Check the `--help` output about the `--exec` options (and
-`--exec-insecure`, `--exec-args`, `--exec-arg`). In exec mode, the script
-simple does something else. It will download an external script and execute
-that instead. That script can do anything and you can tweak it to be useful for
-debugging.
-
-There is already a default script
-[scripts/simple-exec.sh](scripts/simple-exec.sh). You could take that script as
-starting poing and tweak it (or you can use your own script).
-
-If you use `scripts/simple-exec.sh`, then by default it will call it's calling
-script `simple-tcp-server-client.py` again, albeit with some steps that might
-be useful for debugging. In particular, if the `simple-tcp-server-client.py`
-call fails, the script will hang, which allows you to enter the pod and
-investigate the problem yourself.
-
-If a non-empty first parameter to `scripts/simple-exec.sh` is provided, then
-that is expected to be a URL to download a `simple-tcp-server-client.py` like
-script, which is invoked instead of the `simple-tcp-server-client.py` script
-from the tft container.
-
-This allows you to run arbitrary code without need to rebuild the tft
-container. In a first step, you can pass your own `--exec` script. Either based
-on `scripts/simple-exec.sh` or whatever suits you.
-
-If you use the unmodified `scripts/simple-exec.sh`, then by default it will
-call back into `scripts/simple-tcp-server-client.py` from inside the container.
-This then runs the actual traffic flow test. If you wish, you can also provide
-your own patched variant of that latter script, instead of using the one from
-the container.
-
-For example, consider the following configuration.
-
-```
---- c/tft-config.yaml
-+++ i/tft-config.yaml
-@@ -1,21 +1,24 @@
- tft:
-   - name: "Test 1"
-     namespace: "default"
-     test_cases: "1"
-     duration: "30"
-+    privileged_pod: true
-     connections:
-       - name: "Connection_1"
--        type: "iperf-udp"
-+        type: "simple"
-         instances: 1
-         server:
-           - name: "$worker"
-             sriov: "true"
-+            args: "--num-clients 0 --exec https://example.com/tft-test/simple-exec.sh --exec-insecure -E https://example.com/tft-test/simple-tcp-server-client.py"
-         client:
-           - name: "$worker"
-             sriov: "true"
-+            args: "--exec https://example.com/tft-test/simple-exec.sh --exec-insecure -E https://example.com/tft-test/simple-tcp-server-client.py"
-```
-
-In above example, the server side will first download and exec
-`https://example.com/tft-test/simple-exec.sh`, with one parameter, the URL
-`https://example.com/tft-test/simple-tcp-server-client.py`. If that scripts
-behaves as the `scripts/simple-exec.sh` from our tree, then it will take the
-first argument, download it, and execut that script as if it were a
-"simple-tcp-server-client.py" script.  Note how the parameters like
-`--num-clients 0` will be passed all the way down to that last python script.
-This leaves you two scripts that you can tweak to your needs and update easily,
-while being based on some default implementations that can be useful without
-modification.
+See [CONTRIBUTING](CONTRIBUTING.md) for developer setup and contribution rules,
+[GOVERNANCE](GOVERNANCE.md), [MAINTAINERS](MAINTAINERS.md), and [MEETINGS](MEETINGS.md)
+for project participation. The source is licensed under [Apache 2.0](LICENSE).

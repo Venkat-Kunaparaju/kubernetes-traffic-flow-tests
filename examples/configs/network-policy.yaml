@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+# NetworkPolicy and MultiNetworkPolicy. Requires two workers and a CNI that enforces NetworkPolicy.
+# Replace worker-1/worker-2 and any site-specific values before running.
+
+tft:
+- name: NetworkPolicy and MultiNetworkPolicy
+  namespace: tft-docs
+  test_cases: 35,36
+  duration: 10
+  connections:
+  - name: traffic
+    type: http
+    instances: 1
+    reverse: false
+    server:
+    - name: worker-1
+    client:
+    - name: worker-2

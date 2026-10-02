@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+# DPU offload checks; requires paired clusters and a VF-backed default NAD.
+# Replace kubeconfig paths, worker names, default/ovn-primary and example.com/vf.
+
+kubeconfig: /path/tenant.yaml
+kubeconfig_infra: /path/infra.yaml
+dpu_node_host_label: provisioning.dpu.nvidia.com/host
+tft:
+- name: DPU mode and offload
+  namespace: tft-docs
+  test_cases: 1,2
+  duration: 10
+  connections:
+  - name: traffic
+    type: iperf-tcp
+    instances: 1
+    reverse: false
+    server:
+    - name: worker-1
+      sriov: true
+      default_network: default/ovn-primary
+    client:
+    - name: worker-2
+      sriov: true
+      default_network: default/ovn-primary
+    resource_name: example.com/vf
+    plugins:
+    - name: validate_offload
+      test_cases:
+      - 1
+      - 2

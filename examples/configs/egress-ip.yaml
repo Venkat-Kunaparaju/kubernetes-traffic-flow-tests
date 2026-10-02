@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+# EgressIP. Requires OVN-Kubernetes EgressIP support, two workers and reachable runner-side Podman iperf3 server.
+# Replace worker-1/worker-2 and any site-specific values before running.
+
+tft:
+- name: EgressIP
+  namespace: tft-docs
+  test_cases: '68'
+  duration: 10
+  connections:
+  - name: traffic
+    type: iperf-tcp
+    instances: 1
+    reverse: false
+    server:
+    - name: worker-1
+    client:
+    - name: worker-2
+    egress_ip:
+      ip: 192.0.2.100
+      node: worker-2

@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+# RuntimeClass. Requires a pre-existing RuntimeClass and workers that can schedule its handler.
+# Replace worker-1/worker-2 and any site-specific values before running.
+
+tft:
+- name: RuntimeClass
+  namespace: tft-docs
+  test_cases: 1,2
+  duration: 10
+  runtime_class_name: kata
+  connections:
+  - name: traffic
+    type: iperf-tcp
+    instances: 1
+    reverse: false
+    server:
+    - name: worker-1
+    client:
+    - name: worker-2

@@ -1,0 +1,108 @@
+<!--
+SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+SPDX-License-Identifier: Apache-2.0
+-->
+
+# Generate a baseline
+
+Use this page when you want thresholds based on successful known-good measurements.
+
+## Workflow
+
+1. Prepare a known-good cluster and a representative suite. Keep node selection,
+   image, arguments, resource budgets, RuntimeClass, target-access variants,
+   and test configuration consistent with future comparisons.
+2. Run several times with no rate thresholds. Retain the producing TFT revision
+   and configuration alongside the result files.
+3. Generate a candidate baseline from those JSON files.
+4. Inspect the generated thresholds and coverage, then evaluate later runs with
+   the candidate using `--check`.
+
+```bash
+./tft.py --check --kubeconfig /path/tenant.yaml -o ft-logs/baseline-a- quickstart.yaml
+./tft.py --check --kubeconfig /path/tenant.yaml -o ft-logs/baseline-b- quickstart.yaml
+./tft.py --check --kubeconfig /path/tenant.yaml -o ft-logs/baseline-c- quickstart.yaml
+./generate_eval_config.py --quorum 3 -o baseline.yaml ft-logs/baseline-*.json
+./tft.py --check --kubeconfig /path/tenant.yaml quickstart.yaml baseline.yaml
+```
+ With the quickstart's `reverse: false`, this workflow collects normal-direction
+thresholds only. Enable reverse before collecting if you also need reverse baselines. An
+empty direction in the resulting config applies no rate limit.
+
+## Command-line options
+
+`./generate_eval_config.py [options] [RESULT.json ...]` accepts zero or more result
+files; useful generation needs actual measurements or a base config.
+
+| Option | Default | Purpose / example |
+| --- | --- | --- |
+| `-h`, `--help` | — | Display usage. |
+| `-o`, `--output` | YAML to stdout | Write a file: `-o baseline.yaml`; without it, redirect stdout to save the generated YAML. |
+| `-S`, `--skip-invalid-logs` | `false` | Ignore unparsable files, including incompatible older schemas: `-S ft-logs/*.json`. Valid files with failed results are filtered separately. |
+| `-f`, `--force` | `false` | Overwrite an existing output file: `-f -o baseline.yaml`. |
+| `-Q`, `--quorum` | `0` | Minimum successful samples per RX/TX identity, both before and after outlier filtering: `--quorum 3`. |
+| `-c`, `--config` | None | Update a base config's existing identities: `-c baseline.yaml -o candidate.yaml`. New case/type identities are not added. |
+| `-T`, `--tighten-only` | `false` | With `--config`, only increase configured thresholds: `-T -c baseline.yaml`. Requires a base config; missing it exits with status 4. |
+| `-v`, `--verbose` | `false` | Log collected rates and calculation detail. |
+
+Existing output files require `--force`, except when `--config` and `--output` name the
+same file, which the tool updates in place. Use a separate candidate filename when you
+want to compare before replacing the old baseline.
+
+For example, update existing thresholds without loosening them:
+
+```bash
+./generate_eval_config.py -v --quorum 3 -c baseline.yaml --tighten-only -o candidate.yaml ft-logs/baseline-*.json
+```
+
+## Calculation and coverage
+
+The tool groups by test type, case ID, and normal/reverse direction. Connection, node,
+instance, target-access mode, and runtime are not separate baseline keys. Do not combine
+environments that need different limits into one baseline.
+
+Only aggregate entries whose recorded flow **and every plugin** passed their previous
+evaluation contribute samples. A previous overly strict baseline can therefore exclude
+valid measurements. Re-evaluate input files with `''` first if you need to remove
+previous rate thresholds; actual allow-flow and plugin failures remain failures.
+
+For each direction's RX/TX rates:
+
+1. Ignore unavailable (`null`) values and require the quorum.
+2. Compute the mean and population standard deviation.
+3. Keep values strictly inside `mean ± 3 × standard deviation`; require quorum
+   again after filtering.
+4. Recompute those statistics and choose
+   `max(mean - 2 × standard deviation, mean × 0.8)`.
+
+This formula sets an 80%-of-mean floor on the generated lower bound; it does not simply
+reduce every rate by 20%. It is not a confidence interval or a universal regression
+tolerance. Review variability and choose an operational margin suitable for your cluster
+before enforcing the candidate.
+
+The strict outlier bounds mean identical samples (including a single sample) can all be
+discarded when standard deviation is zero. That direction may produce no threshold.
+Check generated coverage rather than assuming that a quorum alone guarantees a
+threshold. HTTP/simple and other unavailable rates also produce no new rate limit. An
+empty baseline does not enforce performance.
+
+With `--config`, unavailable new measurements preserve the corresponding base threshold;
+a base direction with no threshold remains unset. `--tighten-only` uses the larger of
+the old and computed thresholds where both exist. Plugin packet/CPU/power limits are not
+generated by this tool.
+
+## Sample files
+
+[examples/eval/fixture-baseline.yaml](../../examples/eval/fixture-baseline.yaml) is a
+small excerpt from
+[tests/generate-eval-config-output1.yaml](../../tests/generate-eval-config-output1.yaml),
+the generator's expected-output fixture. It demonstrates serialized thresholds, not an
+approved baseline for your hardware. The [smoke](../../examples/eval/smoke.yaml) and
+[directional](../../examples/eval/directional.yaml) configs contain clearly labelled
+illustrative thresholds to show the two accepted forms.
+
+## Next steps
+
+- [Apply thresholds](evaluation.md)
+- [Compare measurements](reading-results.md)
+- [Output compatibility](output-files.md)

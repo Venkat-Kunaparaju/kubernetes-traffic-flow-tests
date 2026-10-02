@@ -167,3 +167,21 @@ When you submit your pull request, or you push new commits to it, our automated
 systems will run some checks on your new code. We require that your pull request
 passes these checks, but we also have more criteria than just that before we can
 accept and merge it.
+
+## Developer environment
+
+For contributor tests and linters, install the developer requirements instead
+of the runtime-only requirements:
+
+```bash
+python3.11 -m venv tft-venv
+source tft-venv/bin/activate
+python -m pip install -r requirements-devel.txt
+pytest
+black --check .
+flake8
+mypy .
+```
+
+These tools are optional for people running TFT on a cluster. See
+[installation](docs/getting-started/install.md) for the runner environment.

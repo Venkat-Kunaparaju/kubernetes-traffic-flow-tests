@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+# Traffic-pod resource limits. Requires two workers with enough allocatable CPU and memory.
+# Replace worker-1/worker-2 and any site-specific values before running.
+
+tft:
+- name: Traffic-pod resource limits
+  namespace: tft-docs
+  test_cases: 1,2,5,6
+  duration: 10
+  connections:
+  - name: traffic
+    type: iperf-tcp
+    instances: 1
+    reverse: false
+    server:
+    - name: worker-1
+    client:
+    - name: worker-2
+    cpu_request: 100m
+    cpu_limit: 1000m
+    mem_request: 64Mi
+    mem_limit: 256Mi

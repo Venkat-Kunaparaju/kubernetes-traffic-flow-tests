@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+# External traffic. Requires a runner-side Podman server reachable from cluster clients, or a pre-existing external server.
+# Replace worker-1/worker-2 and any site-specific values before running.
+
+tft:
+- name: External traffic
+  namespace: tft-docs
+  test_cases: 25,26
+  duration: 10
+  connections:
+  - name: traffic
+    type: iperf-tcp
+    instances: 1
+    reverse: false
+    server:
+    - name: worker-1
+    client:
+    - name: worker-2

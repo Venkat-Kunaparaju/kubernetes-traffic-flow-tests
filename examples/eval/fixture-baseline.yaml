@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+# Excerpt of tests/generate-eval-config-output1.yaml; not a live baseline.
+# Replace these fixture-derived thresholds with your known-good measurements.
+
+IPERF_TCP:
+- id: POD_TO_POD_SAME_NODE
+  Normal:
+    threshold_rx: 20.167733333333334
+    threshold_tx: 20.222933333333334
+  Reverse:
+    threshold_rx: 21.877333333333333
+    threshold_tx: 21.817600000000002
+- id: POD_TO_POD_DIFF_NODE
+  Normal:
+    threshold_rx: 14.4632
+    threshold_tx: 14.498400000000002
+  Reverse:
+    threshold_rx: 14.380000000000003
+    threshold_tx: 14.3476

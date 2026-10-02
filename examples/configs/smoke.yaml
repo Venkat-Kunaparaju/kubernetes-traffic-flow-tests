@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+# Pod and ClusterIP smoke suite. Requires two Ready workers.
+# Replace worker-1/worker-2 and any site-specific values before running.
+
+tft:
+- name: Pod and ClusterIP smoke suite
+  namespace: tft-docs
+  test_cases: 1,2,5,6
+  duration: 10
+  connections:
+  - name: traffic
+    type: iperf-tcp
+    instances: 1
+    reverse: false
+    server:
+    - name: worker-1
+    client:
+    - name: worker-2

@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+# Illustrative directional Gbit/s thresholds for case 2.
+# Adjust each threshold to measurements from your cluster.
+
+IPERF_TCP:
+- id: 2
+  Normal:
+    threshold_tx: 1
+    threshold_rx: 0.9
+  Reverse:
+    threshold_tx: 0.9
+    threshold_rx: 0.8

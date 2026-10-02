@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+# RDMA traffic. Requires RDMA-capable NICs, devices exposed in pods, and working RDMA transport between workers.
+# Replace worker-1/worker-2 and any site-specific values before running.
+
+tft:
+- name: RDMA traffic
+  namespace: tft-docs
+  test_cases: 1,2
+  duration: 10
+  connections:
+  - name: traffic
+    type: ib-write-bw
+    instances: 1
+    reverse: false
+    server:
+    - name: worker-1
+      args:
+      - -d
+      - mlx5_0
+    client:
+    - name: worker-2
+      args:
+      - -d
+      - mlx5_0
