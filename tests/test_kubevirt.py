@@ -171,17 +171,18 @@ def test_vmi_template_resources_and_overrides(tmp_path: Path) -> None:
     assert "qemu-guest-agent" in cloudinit["userData"]
     assert "boot-finished" in spec["readinessProbe"]["exec"]["command"][-1]
     user_data = yaml.safe_load(cloudinit["userData"])
-    wrapper = user_data["write_files"][0]
-    assert wrapper["path"] == "/usr/local/libexec/tft-guest-exec"
-    assert wrapper["permissions"] == "0755"
-    assert wrapper["content"] == '#!/bin/sh\nexec "$@"\n'
-    assert spec["readinessProbe"]["exec"]["command"][0] == wrapper["path"]
-    assert [
-        "chcon",
-        "-t",
-        "virt_qemu_ga_unconfined_exec_t",
-        wrapper["path"],
-    ] in user_data["runcmd"]
+    bootstrap = user_data["bootcmd"][0]
+    wrapper_path = "/usr/local/libexec/tft-guest-exec"
+    assert f"cat > {wrapper_path}" in bootstrap
+    assert f"chmod 0755 {wrapper_path}" in bootstrap
+    assert (
+        "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        in bootstrap
+    )
+    assert 'exec "$@"' in bootstrap
+    assert spec["readinessProbe"]["exec"]["command"][0] == wrapper_path
+    assert "setsebool -P virt_qemu_ga_run_unconfined on" in bootstrap
+    assert f"chcon -t virt_qemu_ga_unconfined_exec_t {wrapper_path}" in bootstrap
     env = {
         "TFT_VM_PRIMARY_INTERFACE": "binding:custom",
         "TFT_VM_SECONDARY_INTERFACE": "sriov",

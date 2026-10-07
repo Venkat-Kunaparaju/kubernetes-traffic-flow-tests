@@ -59,10 +59,43 @@ class VmiEndpoint:
                     namespace=self.namespace,
                     may_fail=True,
                 )
+                self._log_boot_output()
                 raise RuntimeError(
                     f"VMI {self.name} did not reach {condition}: {result.err}"
                 )
         self.run(["/bin/true"], timeout=30, die_on_error=True)
+
+    def _log_boot_output(self) -> None:
+        try:
+            uid = self.get()["metadata"]["uid"]
+            launcher = self.launcher()
+            result = self.client.oc(
+                [
+                    "--request-timeout=30s",
+                    "exec",
+                    launcher,
+                    "-c",
+                    "compute",
+                    "--",
+                    "tail",
+                    "-n",
+                    "200",
+                    f"/var/run/kubevirt-private/{uid}/virt-serial0-log",
+                ],
+                namespace=self.namespace,
+                may_fail=True,
+            )
+            logger.error(
+                "VMI %s/%s serial boot output:\n%s%s",
+                self.namespace,
+                self.name,
+                result.out,
+                result.err,
+            )
+        except (RuntimeError, ValueError, KeyError, TypeError) as exc:
+            logger.warning(
+                "Cannot read VMI %s/%s boot output: %s", self.namespace, self.name, exc
+            )
 
     def launcher(self) -> str:
         vmi = self.get()
