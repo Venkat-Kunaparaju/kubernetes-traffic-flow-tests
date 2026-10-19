@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataVolume
+metadata:
+  namespace: {{ name_space }}
+  name: {{ vm_base_pvc }}
+  labels:
+    tft-tests: {{ label_tft_tests }}
+    tft-vmi: "true"
+    tft-vmi-disk: base
+  annotations:
+    # The base image has no VM consumer to trigger delayed storage binding.
+    cdi.kubevirt.io/storage.bind.immediate.requested: "true"
+spec:
+  source:
+    registry:
+      url: docker://quay.io/containerdisks/fedora:latest
+      pullMethod: node
+  storage:
+    resources:
+      requests:
+        storage: 10Gi

@@ -554,7 +554,9 @@ class TrafficFlowTests:
         logger.info(f"Found existing UDN namespace {udn_ns}, cleaning up TFT resources")
         self._cleanup_udn_resources(cfg_descr, udn_ns, delete_namespace=False)
 
-    def _cleanup_vmis(self, cfg_descr: ConfigDescriptor, namespace: str) -> None:
+    def _cleanup_vmis(
+        self, cfg_descr: ConfigDescriptor, namespace: str, *, delete_base: bool = True
+    ) -> None:
         if any(tc.is_vm for tc in cfg_descr.get_tft().get_all_conn_test_cases()):
             cfg_descr.tc.client_tenant.oc(
                 [
@@ -568,6 +570,21 @@ class TrafficFlowTests:
                 ],
                 namespace=namespace,
                 die_on_error=True,
+            )
+            selector = "tft-tests,tft-vmi=true,tft-vmi-disk=endpoint"
+            if delete_base:
+                selector = "tft-tests,tft-vmi=true,tft-vmi-disk"
+            command = [
+                "delete",
+                kubevirt.DATAVOLUME_RESOURCE,
+                "-l",
+                selector,
+                "--cascade=foreground",
+                "--wait=true",
+                "--timeout=120s",
+            ]
+            cfg_descr.tc.client_tenant.oc(
+                command, namespace=namespace, die_on_error=True
             )
 
     def _cleanup_previous_testspace(
@@ -588,7 +605,7 @@ class TrafficFlowTests:
 
             if self._udn_setup_done:
                 udn_ns = tftbase.get_udn_namespace(namespace)
-                self._cleanup_vmis(cfg_descr, udn_ns)
+                self._cleanup_vmis(cfg_descr, udn_ns, delete_base=force_cleanup)
                 client.oc("delete pods -l tft-tests", namespace=udn_ns)
                 client.oc("delete services -l tft-tests", namespace=udn_ns)
 

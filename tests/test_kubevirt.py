@@ -122,6 +122,7 @@ def test_vmi_template_resources_and_overrides(tmp_path: Path) -> None:
             }
         ]
     )
+    tc._client_tenant = mock.Mock()
     server, _ = endpoints(tc)
     server._resource_name = ""
     manifest = render(server, tmp_path)
@@ -140,6 +141,34 @@ def test_vmi_template_resources_and_overrides(tmp_path: Path) -> None:
     }
     assert spec["domain"]["memory"] == {"guest": "2Gi"}
     assert spec["domain"]["cpu"] == {"cores": 1}
+    assert spec["volumes"][0] == {
+        "name": "root",
+        "dataVolume": {"name": server.vmi.disk_name},
+    }
+    with mock.patch(
+        "tftbase.get_manifest_renderpath", side_effect=lambda name: str(tmp_path / name)
+    ), mock.patch.object(kubevirt.VmiEndpoint, "setup") as setup:
+        server.setup_pod()
+    setup.assert_called_once_with(
+        str(tmp_path / f"{server.pod_name}.yaml"),
+        tftbase.get_tft_pod_bringup_timeout(),
+        base_manifest=str(tmp_path / "vmi-base-ft-udn.yaml"),
+        disk_manifest=str(tmp_path / f"{server.vmi.disk_name}.yaml"),
+    )
+    base_disk = yaml.safe_load((tmp_path / "vmi-base-ft-udn.yaml").read_text())
+    clone = yaml.safe_load((tmp_path / f"{server.vmi.disk_name}.yaml").read_text())
+    assert base_disk["spec"]["source"]["registry"]["url"] == (
+        "docker://quay.io/containerdisks/fedora:latest"
+    )
+    assert base_disk["metadata"]["annotations"] == {
+        "cdi.kubevirt.io/storage.bind.immediate.requested": "true"
+    }
+    assert clone["spec"]["source"] == {
+        "pvc": {"namespace": "ft-udn", "name": kubevirt.BASE_DISK_NAME}
+    }
+    assert clone["metadata"]["name"] == spec["volumes"][0]["dataVolume"]["name"]
+    assert clone["spec"]["storage"] == {}
+    assert server.vmi.disk_name != endpoints(tc)[1].vmi.disk_name
     for cpu_request, cpu_limit, cores in (
         (None, None, 1),
         (None, "3", 3),
@@ -356,11 +385,37 @@ def test_preprovision_reuse_and_cleanup() -> None:
     )
     endpoint = kubevirt.VmiEndpoint(api, "ft", s1.pod_name)
     with mock.patch.object(endpoint, "run", return_value=host.Result("", "", 0)):
-        endpoint.setup("vmi.yaml", "2m")
-        assert api.oc.call_args_list[0].args[0] == ["apply", "-f", "vmi.yaml"]
+        endpoint.setup(
+            "vmi.yaml",
+            "2m",
+            base_manifest="base.yaml",
+            disk_manifest="clone.yaml",
+        )
+        assert [c.args[0] for c in api.oc.call_args_list[:5]] == [
+            ["apply", "-f", "base.yaml"],
+            [
+                "wait",
+                f"{kubevirt.DATAVOLUME_RESOURCE}/{kubevirt.BASE_DISK_NAME}",
+                "--for=jsonpath={.status.phase}=Succeeded",
+                "--timeout=2m",
+            ],
+            ["apply", "-f", "clone.yaml"],
+            ["apply", "-f", "vmi.yaml"],
+            [
+                "wait",
+                f"{kubevirt.DATAVOLUME_RESOURCE}/{endpoint.disk_name}",
+                "--for=jsonpath={.status.phase}=Succeeded",
+                "--timeout=2m",
+            ],
+        ]
         api.oc_get.return_value = {"metadata": {"labels": {"tft-vmi": "true"}}}
         api.oc.reset_mock()
-        endpoint.setup("vmi.yaml", "2m")
+        endpoint.setup(
+            "vmi.yaml",
+            "2m",
+            base_manifest="base.yaml",
+            disk_manifest="clone.yaml",
+        )
         assert all(call.args[0][0] == "wait" for call in api.oc.call_args_list)
     tc._client_tenant = api
     api.oc.reset_mock()
@@ -371,7 +426,36 @@ def test_preprovision_reuse_and_cleanup() -> None:
         "-l",
         "tft-tests,tft-vmi=true",
     ]
-    assert "userdefinednetwork" in api.oc.call_args_list[1].args[0]
+    assert api.oc.call_args_list[1].args[0][:4] == [
+        "delete",
+        kubevirt.DATAVOLUME_RESOURCE,
+        "-l",
+        "tft-tests,tft-vmi=true,tft-vmi-disk",
+    ]
+    assert "userdefinednetwork" in api.oc.call_args_list[2].args[0]
+    api.oc.reset_mock()
+    runner._cleanup_vmis(descriptor, "ft-udn", delete_base=False)
+    assert api.oc.call_args_list[1].args[0][3].endswith("tft-vmi-disk=endpoint")
+    api.oc_get.return_value = None
+    api.oc.reset_mock()
+    api.oc.side_effect = [host.Result("", "import rejected", 1)]
+    with pytest.raises(RuntimeError, match="Failed to create DataVolume"):
+        endpoint.setup(
+            "vmi.yaml",
+            "2m",
+            base_manifest="base.yaml",
+            disk_manifest="clone.yaml",
+        )
+    assert api.oc.call_count == 1
+    api.oc.side_effect = None
+    api.oc_get.side_effect = [None, {"metadata": {"labels": {}}}]
+    with pytest.raises(RuntimeError, match="Refusing to reuse non-TFT DataVolume"):
+        endpoint.setup(
+            "vmi.yaml",
+            "2m",
+            base_manifest="base.yaml",
+            disk_manifest="clone.yaml",
+        )
 
 
 def test_guest_exec_protocol_and_network_address() -> None:

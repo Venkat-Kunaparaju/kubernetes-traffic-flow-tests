@@ -358,7 +358,7 @@ These examples use the primary UDN configured through
 different-node cases use their respective nodes. With pre-provisioning, this
 example shares one server VMI between two client VMIs. Pod and VM cases can
 coexist in one entry and provision separate endpoints. `--no-cleanup` retains
-VMIs; evaluation thresholds can be set in `eval-config.yaml`.
+VMIs and their disks; evaluation thresholds can be set in `eval-config.yaml`.
 
 VM servers provision ClusterIP and NodePort Services using the guest server port,
 with separate names from Pod Services. The shared LoadBalancer Service helper
@@ -391,12 +391,27 @@ VM endpoints also use these shared configuration fields:
 
 Node names, namespace, `udn_primary_network`, `secondary_network_nad`, and
 `resource_name` use the shared settings described above.
-`TFT_IMAGE_PULL_POLICY` and `TFT_POD_BRINGUP_TIMEOUT` also apply. Pod security
-settings, `runtime_class_name`, `sriov`, and `default_network` do not configure
-VM guest security or bindings.
+`TFT_POD_BRINGUP_TIMEOUT` covers each import, clone, and guest readiness wait.
+Pod security settings, `runtime_class_name`, `sriov`, and `default_network` do not
+configure VM guest security or bindings.
 
-The template fixes the disk image to `quay.io/containerdisks/fedora:latest` and
-uses cloud-init to provision tools for the connection's traffic type:
+TFT imports `quay.io/containerdisks/fedora:latest` once per VM namespace into
+an unbooted base DataVolume, then clones a separate writable disk for each VMI.
+The VMI references its DataVolume/PVC instead of a container disk, avoiding
+KubeVirt's container-disk checksum status path. The base remains available
+between test cases; pre-provisioning also reuses endpoint disks. Cleanup deletes
+VMIs first, then TFT-owned DataVolumes and their PVCs.
+
+CDI and a default virtualization/Kubernetes storage class are required. The
+base import requests `10Gi`; CDI selects volume/access modes and clone sizes
+through its storage profiles. Customize storage or registry authentication using
+`vmi-base-datavolume.yaml.j2` and `vmi-disk.yaml.j2` overrides in
+`TFT_MANIFESTS_OVERRIDES`. Storage must allow the selected VM nodes; delayed
+binding is supported for endpoint clones. For mixed CPU architectures, provide
+a matching base image/registry platform through an override. Registry imports
+use CDI's image-pull settings rather than `TFT_IMAGE_PULL_POLICY`.
+
+Cloud-init provisions tools for the connection's traffic type:
 
 | Traffic type | Guest provisioning |
 | --- | --- |
@@ -415,12 +430,14 @@ and libraries; the guest still needs a usable RDMA device and kernel driver.
 First boot requires access to Fedora package repositories; allow enough time
 with `TFT_POD_BRINGUP_TIMEOUT`. Customize guest setup through a `vmi.yaml.j2`
 override in `TFT_MANIFESTS_OVERRIDES`, preserving its guest-execution wrapper.
+Custom VMI overrides must retain the root DataVolume reference (`vm_disk_name`).
 Pod image variables do not select the VM image.
 
 Guest address selection requires IPv4. The network or binding must supply DHCP
 replies, or the template override must configure guest addresses explicitly.
-Grant the kubeconfig VMI management, launcher Pod read/exec, and TFT network
-permissions.
+Grant the kubeconfig VMI and DataVolume management, PVC read access, launcher
+Pod read/exec, same-namespace CDI clone authorization, and TFT network permissions.
+CDI import/clone workers also need network and storage access in the VM namespace.
 
 Pod inspection plugins (`validate_offload`, `ovs_doca_validate_offload`,
 `ping_mgmt_port`) cannot run on VM cases; restrict them to Pod cases using the

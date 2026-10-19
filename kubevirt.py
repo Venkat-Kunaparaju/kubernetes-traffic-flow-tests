@@ -5,6 +5,7 @@ import base64
 import ipaddress
 import json
 import logging
+import threading
 import time
 from collections.abc import Iterable
 from typing import Any
@@ -17,6 +18,9 @@ logger = logging.getLogger("tft." + __name__)
 
 VMI_RESOURCE = "virtualmachineinstance.kubevirt.io"
 VMI_LABEL = "tft-vmi"
+DATAVOLUME_RESOURCE = "datavolume.cdi.kubevirt.io"
+BASE_DISK_NAME = "tft-vmi-base"
+_base_disk_lock = threading.Lock()
 
 
 class VmiEndpoint:
@@ -33,16 +37,72 @@ class VmiEndpoint:
             raise RuntimeError(f"Cannot read VMI {self.namespace}/{self.name}")
         return vmi
 
-    def setup(self, manifest: str, timeout: str) -> None:
+    @property
+    def disk_name(self) -> str:
+        return f"{self.name}-root"
+
+    def _ensure_data_volume(self, name: str, manifest: str) -> None:
+        existing = self.client.oc_get(
+            f"{DATAVOLUME_RESOURCE}/{name}", namespace=self.namespace, may_fail=True
+        )
+        if existing is not None:
+            if existing.get("metadata", {}).get("labels", {}).get(VMI_LABEL) != "true":
+                raise RuntimeError(f"Refusing to reuse non-TFT DataVolume {name}")
+            return
+        if (
+            self.client.oc_get(f"pvc/{name}", namespace=self.namespace, may_fail=True)
+            is not None
+        ):
+            raise RuntimeError(
+                f"Refusing to adopt existing PVC {self.namespace}/{name}"
+            )
+        result = self.client.oc(["apply", "-f", manifest], namespace=self.namespace)
+        if not result.success:
+            raise RuntimeError(f"Failed to create DataVolume {name}: {result.err}")
+
+    def _wait_disk(self, resource: str, phase: str, timeout: str) -> None:
+        result = self.client.oc(
+            [
+                "wait",
+                resource,
+                f"--for=jsonpath={{.status.phase}}={phase}",
+                f"--timeout={timeout}",
+            ],
+            namespace=self.namespace,
+        )
+        if not result.success:
+            self.client.oc(
+                ["describe", resource], namespace=self.namespace, may_fail=True
+            )
+            raise RuntimeError(
+                f"Disk {self.namespace}/{resource} did not reach {phase}: {result.err}"
+            )
+
+    def setup(
+        self,
+        manifest: str,
+        timeout: str,
+        *,
+        base_manifest: str,
+        disk_manifest: str,
+    ) -> None:
         existing = self.client.oc_get(
             f"{VMI_RESOURCE}/{self.name}", namespace=self.namespace, may_fail=True
         )
         if existing is None:
+            with _base_disk_lock:
+                self._ensure_data_volume(BASE_DISK_NAME, base_manifest)
+                self._wait_disk(
+                    f"{DATAVOLUME_RESOURCE}/{BASE_DISK_NAME}", "Succeeded", timeout
+                )
+            self._ensure_data_volume(self.disk_name, disk_manifest)
             result = self.client.oc(["apply", "-f", manifest], namespace=self.namespace)
             if not result.success:
                 raise RuntimeError(f"Failed to create VMI {self.name}: {result.err}")
         elif existing.get("metadata", {}).get("labels", {}).get(VMI_LABEL) != "true":
             raise RuntimeError(f"Refusing to reuse non-TFT VMI {self.name}")
+        # Creating the VMI lets KubeVirt schedule storage with WaitForFirstConsumer.
+        self._wait_disk(f"{DATAVOLUME_RESOURCE}/{self.disk_name}", "Succeeded", timeout)
         for condition in ("Ready", "AgentConnected"):
             result = self.client.oc(
                 [

@@ -96,10 +96,8 @@ spec:
 {% endfor %}
   volumes:
   - name: root
-    containerDisk:
-      # Guest setup below relies on Fedora's SELinux policy and systemd services.
-      image: quay.io/containerdisks/fedora:latest
-      imagePullPolicy: {{ image_pull_policy }}
+    dataVolume:
+      name: {{ vm_disk_name }}
   - name: cloudinit
     # Supply guest boot configuration through a disk; no metadata service is needed.
     cloudInitNoCloud:

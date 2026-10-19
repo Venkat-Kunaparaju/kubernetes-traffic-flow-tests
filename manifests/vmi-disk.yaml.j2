@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataVolume
+metadata:
+  namespace: {{ name_space }}
+  name: {{ vm_disk_name }}
+  labels:
+    tft-tests: {{ label_tft_tests }}
+    tft-vmi: "true"
+    tft-vmi-disk: endpoint
+spec:
+  source:
+    pvc:
+      namespace: {{ name_space }}
+      name: {{ vm_base_pvc }}
+  storage: {}
