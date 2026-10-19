@@ -439,10 +439,30 @@ def get_udn_no_overlay_routing_managed() -> bool:
 
 
 @functools.cache
-def get_secondary_nad_subnets() -> str:
-    s = get_environ(ENV_TFT_SECONDARY_NAD_SUBNETS) or "10.193.0.0/16/26"
-    logger.info(f"env: {ENV_TFT_SECONDARY_NAD_SUBNETS}={shlex.quote(s)}")
-    return s
+def get_secondary_nad_subnets(topology: str) -> str:
+    topologies = get_secondary_nad_topologies()
+    s = get_environ(ENV_TFT_SECONDARY_NAD_SUBNETS)
+    # Distinct pools avoid ambiguous routes when shared pods attach both networks.
+    defaults = {"layer2": "10.194.0.0/16", "layer3": "10.193.0.0/16/26"}
+    subnets = (
+        tuple(value.strip() for value in s.split(","))
+        if s
+        else tuple(defaults[value] for value in topologies)
+    )
+    if len(subnets) != len(topologies) or any(not value for value in subnets):
+        raise ValueError(
+            f"{ENV_TFT_SECONDARY_NAD_SUBNETS} must contain one subnet per topology "
+            f"in {ENV_TFT_SECONDARY_NAD_TOPOLOGY}, in the same order"
+        )
+    logger.info(
+        f"env: {ENV_TFT_SECONDARY_NAD_SUBNETS}={shlex.quote(','.join(subnets))}"
+    )
+    # Pair entries by input order, even when Layer 3 is listed before Layer 2.
+    subnet = subnets[topologies.index(topology)]
+    # Layer 2 allocates from one shared subnet rather than per-node subnets.
+    if topology == "layer2":
+        return _parse_udn_primary_subnet(subnet)[0]
+    return subnet
 
 
 @functools.cache
@@ -453,10 +473,29 @@ def get_secondary_nad_mtu() -> int:
 
 
 @functools.cache
-def get_secondary_nad_topology() -> str:
+def get_secondary_nad_topologies() -> tuple[str, ...]:
     s = get_environ(ENV_TFT_SECONDARY_NAD_TOPOLOGY) or "layer3"
     logger.info(f"env: {ENV_TFT_SECONDARY_NAD_TOPOLOGY}={shlex.quote(s)}")
-    return s
+    topologies = tuple(value.strip().lower() for value in s.split(","))
+    if any(value not in ("layer2", "layer3") for value in topologies):
+        raise ValueError(
+            f"{ENV_TFT_SECONDARY_NAD_TOPOLOGY} must contain only layer2 or layer3"
+        )
+    # Duplicate topologies would map different subnets to the same NAD name.
+    if len(set(topologies)) != len(topologies):
+        raise ValueError(f"{ENV_TFT_SECONDARY_NAD_TOPOLOGY} must not repeat topologies")
+    return topologies
+
+
+def get_secondary_nad_topology() -> str:
+    return get_secondary_nad_topologies()[0]
+
+
+def get_secondary_nad_name(topology: str, base_name: str = "tft-secondary") -> str:
+    # Preserve existing NAD references when only one topology is selected.
+    if len(get_secondary_nad_topologies()) == 1:
+        return base_name
+    return f"{base_name}-{topology}"
 
 
 T = typing.TypeVar("T")
@@ -981,6 +1020,7 @@ class TestMetadata:
     client: PodInfo
     target_access_mode: TargetAccessMode = TargetAccessMode.IP
     expects_blocked: bool = False
+    secondary_nad_topology: Optional[str] = None
 
 
 @strict_dataclass
@@ -1164,6 +1204,9 @@ class TftResults:
                 TargetAccessMode.IP.name,
             ):
                 metadata.pop("target_access_mode", None)
+            # Single-topology runs retain the existing JSON shape.
+            if metadata.get("secondary_nad_topology") is None:
+                metadata.pop("secondary_nad_topology", None)
         return {TftResults.TFT_TESTS: data}
 
     def serialize_to_file(

@@ -29,6 +29,8 @@ from ktoolbox.common import StructParseParseContext
 from ktoolbox.common import strict_dataclass
 from ktoolbox.k8sClient import K8sClient
 
+import tftbase
+
 from pluginbase import Plugin
 from testType import TestTypeHandler
 from tftbase import ClusterMode
@@ -513,6 +515,31 @@ class ConfConnection(StructParseBaseNamed):
             "plugins": [p.serialize() for p in self.plugins],
             **extra,
         }
+
+    def get_secondary_nad_topologies(
+        self, test_case: TestCaseType
+    ) -> tuple[Optional[str], ...]:
+        # Endpoint NADs are user-owned; UDN cases select their own networks.
+        if (
+            any(
+                node.secondary_network_nad is not None
+                for node in (*self.server, *self.client)
+            )
+            or test_case.is_udn
+            or not (
+                self.secondary_network_nad is not None
+                or test_case.name.startswith("POD_TO_POD_2ND_INTERFACE")
+                or test_case == TestCaseType.POD_TO_POD_PRIMARY_INTERFACE_MNP_DENY_2ND
+            )
+        ):
+            # None keeps one execution without choosing a generated topology.
+            return (None,)
+        return tftbase.get_secondary_nad_topologies()
+
+    def get_secondary_network_nad(self, topology: str) -> str:
+        return tftbase.get_secondary_nad_name(
+            topology, self.effective_secondary_network_nad
+        )
 
     @property
     def effective_secondary_network_nad(self) -> str:
