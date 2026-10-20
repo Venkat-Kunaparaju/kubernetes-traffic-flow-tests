@@ -11,15 +11,8 @@ metadata:
     tft-pod-name: {{ pod_name }}
     tft-vmi: "true"
 spec:
-  # Wait for guest setup through the guest agent before starting test commands.
   readinessProbe:
-    exec:
-      command:
-      - /usr/local/libexec/tft-guest-exec
-      - /bin/sh
-      - -c
-      - >-
-        test -f /var/lib/cloud/instance/boot-finished || exit 1; {% for command in vm_commands %}command -v {{ command }} >/dev/null || exit 1; {% endfor %}
+    guestAgentPing: {}
     periodSeconds: 5
     timeoutSeconds: 5
   nodeSelector:

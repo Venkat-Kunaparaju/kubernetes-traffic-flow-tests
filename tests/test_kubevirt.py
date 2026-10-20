@@ -154,9 +154,13 @@ def test_vmi_template_resources_and_overrides(tmp_path: Path) -> None:
         tftbase.get_tft_pod_bringup_timeout(),
         base_manifest=str(tmp_path / "vmi-base-ft-udn.yaml"),
         disk_manifest=str(tmp_path / f"{server.vmi.disk_name}.yaml"),
+        base_namespace="ft",
+        ready_commands=["ss", "killall", "timeout", "grep", "iperf3"],
     )
     base_disk = yaml.safe_load((tmp_path / "vmi-base-ft-udn.yaml").read_text())
     clone = yaml.safe_load((tmp_path / f"{server.vmi.disk_name}.yaml").read_text())
+    assert base_disk["metadata"]["namespace"] == "ft"
+    assert clone["metadata"]["namespace"] == "ft-udn"
     assert base_disk["spec"]["source"]["registry"]["url"] == (
         "docker://quay.io/containerdisks/fedora:latest"
     )
@@ -164,7 +168,7 @@ def test_vmi_template_resources_and_overrides(tmp_path: Path) -> None:
         "cdi.kubevirt.io/storage.bind.immediate.requested": "true"
     }
     assert clone["spec"]["source"] == {
-        "pvc": {"namespace": "ft-udn", "name": kubevirt.BASE_DISK_NAME}
+        "pvc": {"namespace": "ft", "name": kubevirt.BASE_DISK_NAME}
     }
     assert clone["metadata"]["name"] == spec["volumes"][0]["dataVolume"]["name"]
     assert clone["spec"]["storage"] == {}
@@ -198,7 +202,11 @@ def test_vmi_template_resources_and_overrides(tmp_path: Path) -> None:
     cloudinit = spec["volumes"][1]["cloudInitNoCloud"]
     assert yaml.safe_load(cloudinit["networkData"])["ethernets"]["ethernet"]["dhcp4"]
     assert "qemu-guest-agent" in cloudinit["userData"]
-    assert "boot-finished" in spec["readinessProbe"]["exec"]["command"][-1]
+    assert spec["readinessProbe"] == {
+        "guestAgentPing": {},
+        "periodSeconds": 5,
+        "timeoutSeconds": 5,
+    }
     user_data = yaml.safe_load(cloudinit["userData"])
     bootstrap = user_data["bootcmd"][0]
     wrapper_path = "/usr/local/libexec/tft-guest-exec"
@@ -209,7 +217,6 @@ def test_vmi_template_resources_and_overrides(tmp_path: Path) -> None:
         in bootstrap
     )
     assert 'exec "$@"' in bootstrap
-    assert spec["readinessProbe"]["exec"]["command"][0] == wrapper_path
     assert "setsebool -P virt_qemu_ga_run_unconfined on" in bootstrap
     assert f"chcon -t virt_qemu_ga_unconfined_exec_t {wrapper_path}" in bootstrap
     env = {
@@ -383,13 +390,15 @@ def test_preprovision_reuse_and_cleanup() -> None:
         oc_get=mock.Mock(return_value=None),
         oc=mock.Mock(return_value=host.Result("", "", 0)),
     )
-    endpoint = kubevirt.VmiEndpoint(api, "ft", s1.pod_name)
+    assert runner._uses_base_namespace(testConfig.ConfigDescriptor(config(), tft_idx=0))
+    endpoint = kubevirt.VmiEndpoint(api, "ft-udn", s1.pod_name)
     with mock.patch.object(endpoint, "run", return_value=host.Result("", "", 0)):
         endpoint.setup(
             "vmi.yaml",
             "2m",
             base_manifest="base.yaml",
             disk_manifest="clone.yaml",
+            base_namespace="ft",
         )
         assert [c.args[0] for c in api.oc.call_args_list[:5]] == [
             ["apply", "-f", "base.yaml"],
@@ -408,6 +417,13 @@ def test_preprovision_reuse_and_cleanup() -> None:
                 "--timeout=2m",
             ],
         ]
+        assert [c.kwargs["namespace"] for c in api.oc.call_args_list[:5]] == [
+            "ft",
+            "ft",
+            "ft-udn",
+            "ft-udn",
+            "ft-udn",
+        ]
         api.oc_get.return_value = {"metadata": {"labels": {"tft-vmi": "true"}}}
         api.oc.reset_mock()
         endpoint.setup(
@@ -415,6 +431,7 @@ def test_preprovision_reuse_and_cleanup() -> None:
             "2m",
             base_manifest="base.yaml",
             disk_manifest="clone.yaml",
+            base_namespace="ft",
         )
         assert all(call.args[0][0] == "wait" for call in api.oc.call_args_list)
     tc._client_tenant = api
@@ -432,7 +449,14 @@ def test_preprovision_reuse_and_cleanup() -> None:
         "-l",
         "tft-tests,tft-vmi=true,tft-vmi-disk",
     ]
-    assert "userdefinednetwork" in api.oc.call_args_list[2].args[0]
+    assert api.oc.call_args_list[2].args[0][:4] == [
+        "delete",
+        kubevirt.DATAVOLUME_RESOURCE,
+        "-l",
+        "tft-tests,tft-vmi=true,tft-vmi-disk=base",
+    ]
+    assert api.oc.call_args_list[2].kwargs["namespace"] == "ft"
+    assert "userdefinednetwork" in api.oc.call_args_list[3].args[0]
     api.oc.reset_mock()
     runner._cleanup_vmis(descriptor, "ft-udn", delete_base=False)
     assert api.oc.call_args_list[1].args[0][3].endswith("tft-vmi-disk=endpoint")
@@ -445,6 +469,7 @@ def test_preprovision_reuse_and_cleanup() -> None:
             "2m",
             base_manifest="base.yaml",
             disk_manifest="clone.yaml",
+            base_namespace="ft",
         )
     assert api.oc.call_count == 1
     api.oc.side_effect = None
@@ -455,7 +480,45 @@ def test_preprovision_reuse_and_cleanup() -> None:
             "2m",
             base_manifest="base.yaml",
             disk_manifest="clone.yaml",
+            base_namespace="ft",
         )
+
+    api.oc_get.side_effect = None
+    api.oc_get.return_value = {"metadata": {"labels": {"tft-vmi": "true"}}}
+    with mock.patch.object(
+        endpoint,
+        "run",
+        side_effect=[host.Result("", "still booting", 1), host.Result("", "", 0)],
+    ) as guest_run, mock.patch("kubevirt.time.sleep") as sleep:
+        endpoint.setup(
+            "vmi.yaml",
+            "2m",
+            base_manifest="base.yaml",
+            disk_manifest="clone.yaml",
+            base_namespace="ft",
+            ready_commands=["iperf3"],
+        )
+        assert guest_run.call_count == 2
+        guest_run.assert_called_with(
+            "test -f /var/lib/cloud/instance/boot-finished && command -v iperf3 >/dev/null",
+            timeout=10,
+            may_fail=True,
+        )
+        sleep.assert_called_once_with(5)
+    with mock.patch.object(
+        endpoint, "run", return_value=host.Result("", "still booting", 1)
+    ), mock.patch("kubevirt.time.monotonic", side_effect=[0, 121]), mock.patch.object(
+        endpoint, "_log_boot_output"
+    ) as boot_output:
+        with pytest.raises(RuntimeError, match="Guest setup did not finish"):
+            endpoint.setup(
+                "vmi.yaml",
+                "2m",
+                base_manifest="base.yaml",
+                disk_manifest="clone.yaml",
+                base_namespace="ft",
+            )
+        boot_output.assert_called_once_with()
 
 
 def test_guest_exec_protocol_and_network_address() -> None:

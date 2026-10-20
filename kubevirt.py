@@ -5,6 +5,8 @@ import base64
 import ipaddress
 import json
 import logging
+import re
+import shlex
 import threading
 import time
 from collections.abc import Iterable
@@ -21,6 +23,25 @@ VMI_LABEL = "tft-vmi"
 DATAVOLUME_RESOURCE = "datavolume.cdi.kubevirt.io"
 BASE_DISK_NAME = "tft-vmi-base"
 _base_disk_lock = threading.Lock()
+
+
+def _duration_seconds(value: str) -> float:
+    units = {
+        "h": 3600,
+        "m": 60,
+        "s": 1,
+        "ms": 1e-3,
+        "us": 1e-6,
+        "µs": 1e-6,
+        "μs": 1e-6,
+        "ns": 1e-9,
+    }
+    parts = list(re.finditer(r"(\d+(?:\.\d*)?|\.\d+)(h|ms|m|ns|us|µs|μs|s)", value))
+    if value == "0":
+        return 0
+    if not parts or "".join(part[0] for part in parts) != value:
+        raise ValueError(f"Invalid provisioning timeout {value!r}")
+    return sum(float(part[1]) * units[part[2]] for part in parts)
 
 
 class VmiEndpoint:
@@ -41,26 +62,35 @@ class VmiEndpoint:
     def disk_name(self) -> str:
         return f"{self.name}-root"
 
-    def _ensure_data_volume(self, name: str, manifest: str) -> None:
+    def _ensure_data_volume(
+        self, name: str, manifest: str, *, namespace: Optional[str] = None
+    ) -> None:
+        namespace = self.namespace if namespace is None else namespace
         existing = self.client.oc_get(
-            f"{DATAVOLUME_RESOURCE}/{name}", namespace=self.namespace, may_fail=True
+            f"{DATAVOLUME_RESOURCE}/{name}", namespace=namespace, may_fail=True
         )
         if existing is not None:
             if existing.get("metadata", {}).get("labels", {}).get(VMI_LABEL) != "true":
                 raise RuntimeError(f"Refusing to reuse non-TFT DataVolume {name}")
             return
         if (
-            self.client.oc_get(f"pvc/{name}", namespace=self.namespace, may_fail=True)
+            self.client.oc_get(f"pvc/{name}", namespace=namespace, may_fail=True)
             is not None
         ):
-            raise RuntimeError(
-                f"Refusing to adopt existing PVC {self.namespace}/{name}"
-            )
-        result = self.client.oc(["apply", "-f", manifest], namespace=self.namespace)
+            raise RuntimeError(f"Refusing to adopt existing PVC {namespace}/{name}")
+        result = self.client.oc(["apply", "-f", manifest], namespace=namespace)
         if not result.success:
             raise RuntimeError(f"Failed to create DataVolume {name}: {result.err}")
 
-    def _wait_disk(self, resource: str, phase: str, timeout: str) -> None:
+    def _wait_disk(
+        self,
+        resource: str,
+        phase: str,
+        timeout: str,
+        *,
+        namespace: Optional[str] = None,
+    ) -> None:
+        namespace = self.namespace if namespace is None else namespace
         result = self.client.oc(
             [
                 "wait",
@@ -68,14 +98,12 @@ class VmiEndpoint:
                 f"--for=jsonpath={{.status.phase}}={phase}",
                 f"--timeout={timeout}",
             ],
-            namespace=self.namespace,
+            namespace=namespace,
         )
         if not result.success:
-            self.client.oc(
-                ["describe", resource], namespace=self.namespace, may_fail=True
-            )
+            self.client.oc(["describe", resource], namespace=namespace, may_fail=True)
             raise RuntimeError(
-                f"Disk {self.namespace}/{resource} did not reach {phase}: {result.err}"
+                f"Disk {namespace}/{resource} did not reach {phase}: {result.err}"
             )
 
     def setup(
@@ -85,15 +113,22 @@ class VmiEndpoint:
         *,
         base_manifest: str,
         disk_manifest: str,
+        base_namespace: Optional[str] = None,
+        ready_commands: Iterable[str] = (),
     ) -> None:
         existing = self.client.oc_get(
             f"{VMI_RESOURCE}/{self.name}", namespace=self.namespace, may_fail=True
         )
         if existing is None:
             with _base_disk_lock:
-                self._ensure_data_volume(BASE_DISK_NAME, base_manifest)
+                self._ensure_data_volume(
+                    BASE_DISK_NAME, base_manifest, namespace=base_namespace
+                )
                 self._wait_disk(
-                    f"{DATAVOLUME_RESOURCE}/{BASE_DISK_NAME}", "Succeeded", timeout
+                    f"{DATAVOLUME_RESOURCE}/{BASE_DISK_NAME}",
+                    "Succeeded",
+                    timeout,
+                    namespace=base_namespace,
                 )
             self._ensure_data_volume(self.disk_name, disk_manifest)
             result = self.client.oc(["apply", "-f", manifest], namespace=self.namespace)
@@ -123,7 +158,22 @@ class VmiEndpoint:
                 raise RuntimeError(
                     f"VMI {self.name} did not reach {condition}: {result.err}"
                 )
-        self.run(["/bin/true"], timeout=30, die_on_error=True)
+        checks = ["test -f /var/lib/cloud/instance/boot-finished"]
+        checks.extend(
+            f"command -v {shlex.quote(command)} >/dev/null"
+            for command in ready_commands
+        )
+        deadline = time.monotonic() + _duration_seconds(timeout)
+        while True:
+            result = self.run(" && ".join(checks), timeout=10, may_fail=True)
+            if result.success:
+                break
+            if time.monotonic() >= deadline:
+                self._log_boot_output()
+                raise RuntimeError(
+                    f"Guest setup did not finish for VMI {self.namespace}/{self.name}: {result.err}"
+                )
+            time.sleep(5)
 
     def _log_boot_output(self) -> None:
         try:

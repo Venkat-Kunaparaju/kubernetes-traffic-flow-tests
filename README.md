@@ -395,8 +395,9 @@ Node names, namespace, `udn_primary_network`, `secondary_network_nad`, and
 Pod security settings, `runtime_class_name`, `sriov`, and `default_network` do not
 configure VM guest security or bindings.
 
-TFT imports `quay.io/containerdisks/fedora:latest` once per VM namespace into
-an unbooted base DataVolume, then clones a separate writable disk for each VMI.
+TFT imports `quay.io/containerdisks/fedora:latest` into an unbooted base
+DataVolume in the normal TFT namespace, then clones a separate writable disk
+for each VMI into the UDN namespace.
 The VMI references its DataVolume/PVC instead of a container disk, avoiding
 KubeVirt's container-disk checksum status path. The base remains available
 between test cases; pre-provisioning also reuses endpoint disks. Cleanup deletes
@@ -424,9 +425,10 @@ Cloud-init provisions tools for the connection's traffic type:
 All guests receive socket/process utilities, `timeout`, `grep`, the QEMU guest
 agent, and SELinux utilities. The template configures DHCP and guest-agent
 execution through the virt-launcher Pod, and disables `firewalld` inside the test
-guest. Readiness waits for cloud-init completion and checks the commands needed
-by the selected traffic type. RDMA provisioning covers guest userspace tools
-and libraries; the guest still needs a usable RDMA device and kernel driver.
+guest. The VMI probe checks guest-agent connectivity; TFT then waits for
+cloud-init completion and checks the commands needed by the selected traffic
+type. RDMA provisioning covers guest userspace tools and libraries; the guest
+still needs a usable RDMA device and kernel driver.
 First boot requires access to Fedora package repositories; allow enough time
 with `TFT_POD_BRINGUP_TIMEOUT`. Customize guest setup through a `vmi.yaml.j2`
 override in `TFT_MANIFESTS_OVERRIDES`, preserving its guest-execution wrapper.
@@ -436,8 +438,8 @@ Pod image variables do not select the VM image.
 Guest address selection requires IPv4. The network or binding must supply DHCP
 replies, or the template override must configure guest addresses explicitly.
 Grant the kubeconfig VMI and DataVolume management, PVC read access, launcher
-Pod read/exec, same-namespace CDI clone authorization, and TFT network permissions.
-CDI import/clone workers also need network and storage access in the VM namespace.
+Pod read/exec, cross-namespace CDI clone authorization, and TFT network permissions.
+CDI import/clone workers also need network and storage access in both namespaces.
 
 Pod inspection plugins (`validate_offload`, `ovs_doca_validate_offload`,
 `ping_mgmt_port`) cannot run on VM cases; restrict them to Pod cases using the

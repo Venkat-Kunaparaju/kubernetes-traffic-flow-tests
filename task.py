@@ -631,6 +631,7 @@ class Task(ABC):
             template_args.update(
                 {
                     "vm_base_pvc": _j(kubevirt.BASE_DISK_NAME),
+                    "vm_base_namespace": _j(self.ts.cfg_descr.get_tft().namespace),
                     "vm_disk_name": _j(f"{self.pod_name}-root"),
                     "vm_packages": vm_packages,
                     "vm_commands": vm_commands,
@@ -1255,6 +1256,7 @@ class Task(ABC):
 
     def setup_pod(self) -> None:
         if self.is_vmi:
+            base_namespace = self.ts.cfg_descr.get_tft().namespace
             base_manifest = tftbase.get_manifest_renderpath(
                 f"vmi-base-{self.get_namespace()}.yaml"
             )
@@ -1262,6 +1264,7 @@ class Task(ABC):
                 "VMI base disk",
                 tftbase.get_manifest("vmi-base-datavolume.yaml.j2"),
                 base_manifest,
+                {**self.get_template_args(), "name_space": _j(base_namespace)},
             )
             disk_manifest = tftbase.get_manifest_renderpath(
                 f"{self.vmi.disk_name}.yaml"
@@ -1276,6 +1279,10 @@ class Task(ABC):
                 tftbase.get_tft_pod_bringup_timeout(),
                 base_manifest=base_manifest,
                 disk_manifest=disk_manifest,
+                base_namespace=base_namespace,
+                ready_commands=typing.cast(
+                    list[str], self.get_template_args()["vm_commands"]
+                ),
             )
             return
         # Check if pod already exists

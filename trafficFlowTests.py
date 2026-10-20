@@ -38,7 +38,7 @@ class TrafficFlowTests:
 
     def _uses_base_namespace(self, cfg_descr: ConfigDescriptor) -> bool:
         return any(
-            tc.uses_base_namespace
+            tc.uses_base_namespace or tc.is_vm
             for tc in cfg_descr.get_tft().get_all_conn_test_cases()
         )
 
@@ -586,6 +586,21 @@ class TrafficFlowTests:
             cfg_descr.tc.client_tenant.oc(
                 command, namespace=namespace, die_on_error=True
             )
+            base_namespace = cfg_descr.get_tft().namespace
+            if delete_base and namespace != base_namespace:
+                cfg_descr.tc.client_tenant.oc(
+                    [
+                        "delete",
+                        kubevirt.DATAVOLUME_RESOURCE,
+                        "-l",
+                        "tft-tests,tft-vmi=true,tft-vmi-disk=base",
+                        "--cascade=foreground",
+                        "--wait=true",
+                        "--timeout=120s",
+                    ],
+                    namespace=base_namespace,
+                    die_on_error=True,
+                )
 
     def _cleanup_previous_testspace(
         self, cfg_descr: ConfigDescriptor, force_cleanup: bool = False
